@@ -5,7 +5,7 @@ use crate::constants::{
 };
 use crate::types::{
     Agent, AgentFunction, ChatCompletionResponse, ContextVariables, FunctionCall, Instructions,
-    Message, Response, ResultType,
+    Message, Response, ResultType, SwarmConfig,
 };
 
 use futures::StreamExt;
@@ -13,11 +13,13 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
+use std::time::Duration;
 
 use crate::types::{Step, Steps};
 use crate::util::{debug_print, extract_xml_steps, function_to_json, parse_steps_from_xml};
 use crate::error::{SwarmError, SwarmResult};
 use crate::validation::validate_api_request;
+use crate::validation::validate_api_url;
 
 impl Default for Swarm {
     fn default() -> Self {
@@ -29,22 +31,95 @@ impl Default for Swarm {
 pub struct Swarm {
     pub client: Client,
     pub api_key: String,
-    agent_registry: HashMap<String, Agent>, // New field
+    agent_registry: HashMap<String, Agent>, //
+    config: SwarmConfig,
 }
 
-impl Swarm {
-    pub fn new(
-        client: Option<Client>,
-        api_key: Option<String>,
-        agents: HashMap<String, Agent>, // Pass agents during initialization
-    ) -> SwarmResult<Self> {
-        // Validate API key
-        let api_key = api_key.unwrap_or_else(|| {
+pub struct SwarmBuilder {
+    client: Option<Client>,
+    api_key: Option<String>,
+    agents: HashMap<String, Agent>,
+    config: SwarmConfig,
+}
+
+impl SwarmBuilder {
+    pub fn new() -> Self {
+        SwarmBuilder {
+            client: None,
+            api_key: None,
+            agents: HashMap::new(),
+            config: SwarmConfig::default(),
+        }
+    }
+
+    pub fn with_config(mut self, config: SwarmConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    pub fn with_api_url(mut self, api_url: String) -> Self {
+        self.config.api_url = api_url;
+        self
+    }
+
+    pub fn with_api_version(mut self, version: String) -> Self {
+        self.config.api_version = version;
+        self
+    }
+
+    pub fn with_request_timeout(mut self, timeout: u64) -> Self {
+        self.config.request_timeout = timeout;
+        self
+    }
+
+    pub fn with_connect_timeout(mut self, timeout: u64) -> Self {
+        self.config.connect_timeout = timeout;
+        self
+    }
+
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.config.max_retries = retries;
+        self
+    }
+
+    pub fn with_max_loop_iterations(mut self, iterations: u32) -> Self {
+        self.config.max_loop_iterations = iterations;
+        self
+    }
+
+    pub fn with_valid_model_prefixes(mut self, prefixes: Vec<String>) -> Self {
+        self.config.valid_model_prefixes = prefixes;
+        self
+    }
+
+    pub fn with_valid_api_url_prefixes(mut self, prefixes: Vec<String>) -> Self {
+        self.config.valid_api_url_prefixes = prefixes;
+        self
+    }
+
+    pub fn with_client(mut self, client: Client) -> Self {
+        self.client = Some(client);
+        self
+    }
+
+    pub fn with_api_key(mut self, api_key: String) -> Self {
+        self.api_key = Some(api_key);
+        self
+    }
+
+    pub fn with_agent(mut self, agent: Agent) -> Self {
+        self.agents.insert(agent.name.clone(), agent);
+        self
+    }
+
+    pub fn build(self) -> SwarmResult<Swarm> {
+        // Get API key from builder or environment
+        let api_key = self.api_key.unwrap_or_else(|| {
             env::var("OPENAI_API_KEY")
-                .unwrap_or_else(|_| panic!("OPENAI_API_KEY must be set either in environment or passed to new()"))
+                .unwrap_or_else(|_| panic!("OPENAI_API_KEY must be set either in environment or passed to builder"))
         });
 
-        // Validate API key is not empty and has valid format
+        // Validate API key
         if api_key.trim().is_empty() {
             return Err(SwarmError::ValidationError("API key cannot be empty".to_string()));
         }
@@ -52,11 +127,56 @@ impl Swarm {
             return Err(SwarmError::ValidationError("Invalid API key format".to_string()));
         }
 
+        // Get and validate API URL
+        let api_url = env::var("OPENAI_API_URL")
+            .unwrap_or_else(|_| OPENAI_DEFAULT_API_URL.to_string());
+
+        // Pass the config to validate_api_url
+        validate_api_url(&api_url, &self.config)?;
+
+        // Create client with timeout configuration
+        let client = self.client.unwrap_or_else(|| {
+            Client::builder()
+                .timeout(Duration::from_secs(
+                    self.config.request_timeout
+                ))
+                .connect_timeout(Duration::from_secs(
+                    self.config.connect_timeout
+                ))
+                .build()
+                .unwrap_or_else(|_| Client::new())
+        });
+
         Ok(Swarm {
-            client: client.unwrap_or_else(Client::new),
+            client,
             api_key,
-            agent_registry: agents,
+            agent_registry: self.agents,
+            config: self.config
         })
+    }
+}
+
+impl Swarm {
+    pub fn builder() -> SwarmBuilder {
+        SwarmBuilder::new()
+    }
+
+    // Keep existing new() method for backward compatibility
+    pub fn new(
+        client: Option<Client>,
+        api_key: Option<String>,
+        _agents: HashMap<String, Agent>,
+    ) -> SwarmResult<Self> {
+        let mut builder = SwarmBuilder::new();
+
+        if let Some(client) = client {
+            builder = builder.with_client(client);
+        }
+        if let Some(api_key) = api_key {
+            builder = builder.with_api_key(api_key);
+        }
+
+        builder.build()
     }
 
     pub async fn get_chat_completion(
@@ -454,8 +574,16 @@ impl Swarm {
         debug: bool,
         max_turns: usize,
     ) -> SwarmResult<Response> {
-        // Add validation before processing
+        // Use config for validation
         validate_api_request(&agent, &messages, &model_override, max_turns)?;
+
+        // Use config values for loop control
+        if max_turns > self.config.max_loop_iterations as usize {
+            return Err(SwarmError::ValidationError(
+                format!("max_turns ({}) exceeds configured max_loop_iterations ({})",
+                    max_turns, self.config.max_loop_iterations)
+            ));
+        }
 
         // Extract XML steps from the agent's instructions
         let instructions = match &agent.instructions {
@@ -526,5 +654,23 @@ impl Swarm {
             agent: Some(agent),
             context_variables,
         })
+    }
+}
+
+impl SwarmConfig {
+    pub fn validate(&self) -> SwarmResult<()> {
+        if self.request_timeout == 0 {
+            return Err(SwarmError::ValidationError("request_timeout must be greater than 0".to_string()));
+        }
+        if self.connect_timeout == 0 {
+            return Err(SwarmError::ValidationError("connect_timeout must be greater than 0".to_string()));
+        }
+        if self.max_retries == 0 {
+            return Err(SwarmError::ValidationError("max_retries must be greater than 0".to_string()));
+        }
+        if self.valid_model_prefixes.is_empty() {
+            return Err(SwarmError::ValidationError("valid_model_prefixes cannot be empty".to_string()));
+        }
+        Ok(())
     }
 }

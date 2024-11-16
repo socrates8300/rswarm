@@ -5,8 +5,8 @@
   - Add input validation for critical paths
 
 - [ ] 2. Add essential safety features
-  - [ ] Request timeouts
-  - [ ] API URL validation
+  - [X] Request timeouts
+  - [X] API URL validation
   - [ ] Rate limiting
   - [ ] Input sanitization
 
@@ -17,8 +17,8 @@
 
 ### Medium Priority (Important Enhancements)
 - [ ] 4. Configuration improvements
-  - [ ] Implement SwarmBuilder pattern
-  - [ ] Make hardcoded values configurable
+  - [X] Implement SwarmBuilder pattern
+  - [X] Make hardcoded values configurable
   - [ ] Add configuration validation
 
 - [ ] 5. Documentation

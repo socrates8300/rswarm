@@ -64,6 +64,12 @@ pub enum SwarmError {
 
     #[error("Other error: {0}")]
     Other(String),
+
+    #[error("Request timed out after {0} seconds")]
+    RequestTimeoutError(u64),
+
+    #[error("URL validation error: {0}")]
+    UrlValidationError(String),
 }
 
 // Type alias for Result with SwarmError

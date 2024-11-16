@@ -2,6 +2,7 @@
 // ./types.rs
 
 use anyhow::Result;
+use crate::constants::{OPENAI_DEFAULT_API_URL, DEFAULT_API_VERSION, DEFAULT_REQUEST_TIMEOUT, DEFAULT_CONNECT_TIMEOUT, VALID_API_URL_PREFIXES};
 use serde::ser::SerializeStruct;
 use serde::{
     de::{self, MapAccess, Visitor},
@@ -171,6 +172,36 @@ impl<'de> Deserialize<'de> for Agent {
             &["name", "model", "function_call", "parallel_tool_calls"];
 
         deserializer.deserialize_struct("Agent", FIELDS, AgentVisitor)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SwarmConfig {
+    pub api_url: String,
+    pub api_version: String,
+    pub request_timeout: u64,
+    pub connect_timeout: u64,
+    pub max_retries: u32,
+    pub max_loop_iterations: u32,
+    pub valid_model_prefixes: Vec<String>,
+    pub valid_api_url_prefixes: Vec<String>,
+}
+
+impl Default for SwarmConfig {
+    fn default() -> Self {
+        SwarmConfig {
+            api_url: OPENAI_DEFAULT_API_URL.to_string(),
+            api_version: DEFAULT_API_VERSION.to_string(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            max_retries: 3,
+            max_loop_iterations: 10,
+            valid_model_prefixes: vec!["gpt-".to_string()],
+            valid_api_url_prefixes: VALID_API_URL_PREFIXES
+                .iter()
+                .map(|&s| s.to_string())
+                .collect(),
+        }
     }
 }
 

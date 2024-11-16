@@ -1,5 +1,6 @@
 use crate::error::{SwarmError, SwarmResult};
-use crate::types::{Agent, Instructions, Message};
+use crate::types::{Agent, Instructions, Message, SwarmConfig};
+use url::Url;
 
 pub fn validate_api_request(
     agent: &Agent,
@@ -58,6 +59,37 @@ pub fn validate_api_request(
         return Err(SwarmError::ValidationError(
             "max_turns must be greater than 0".to_string(),
         ));
+    }
+
+    Ok(())
+}
+
+pub fn validate_api_url(url: &str, config: &SwarmConfig) -> SwarmResult<()> {
+    // Check if URL is empty
+    if url.trim().is_empty() {
+        return Err(SwarmError::ValidationError("API URL cannot be empty".to_string()));
+    }
+
+    // Parse URL
+    let parsed_url = Url::parse(url)
+        .map_err(|e| SwarmError::ValidationError(format!("Invalid API URL format: {}", e)))?;
+
+    // Verify HTTPS
+    if parsed_url.scheme() != "https" {
+        return Err(SwarmError::ValidationError(
+            "API URL must use HTTPS protocol".to_string(),
+        ));
+    }
+
+    // Verify against allowed prefixes
+    if !config.valid_api_url_prefixes
+        .iter()
+        .any(|prefix| url.starts_with(prefix))
+    {
+        return Err(SwarmError::ValidationError(format!(
+            "API URL must start with one of: {}",
+            config.valid_api_url_prefixes.join(", ")
+        )));
     }
 
     Ok(())
