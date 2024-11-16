@@ -2,6 +2,7 @@
 
 use crate::constants::{
     CTX_VARS_NAME, OPENAI_DEFAULT_API_URL, ROLE_ASSISTANT, ROLE_FUNCTION, ROLE_SYSTEM,
+    MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT,
 };
 use crate::types::{
     Agent, AgentFunction, ChatCompletionResponse, ContextVariables, FunctionCall, Instructions,
@@ -28,13 +29,45 @@ impl Default for Swarm {
     }
 }
 
+/// Main struct for managing AI agent interactions and chat completions
+///
+/// The Swarm struct provides the core functionality for managing AI agents,
+/// handling chat completions, and executing function calls. It maintains
+/// a registry of agents and handles API communication with OpenAI.
+///
+/// # Examples
+///
+/// ```rust
+/// use rswarm::Swarm;
+///
+/// let swarm = Swarm::builder()
+///     .with_api_key("your-api-key".to_string())
+///     .build()
+///     .expect("Failed to create Swarm");
+/// ```
 pub struct Swarm {
     pub client: Client,
     pub api_key: String,
-    agent_registry: HashMap<String, Agent>, //
-    config: SwarmConfig,
+    pub agent_registry: HashMap<String, Agent>, //
+    pub config: SwarmConfig,
 }
 
+/// Builder pattern implementation for creating Swarm instances
+///
+/// Provides a flexible way to configure and create a new Swarm instance
+/// with custom settings and validations.
+///
+/// # Examples
+///
+/// ```rust
+/// use rswarm::SwarmBuilder;
+///
+/// let swarm = SwarmBuilder::new()
+///     .with_api_key("your-api-key".to_string())
+///     .with_request_timeout(30)
+///     .build()
+///     .expect("Failed to build Swarm");
+/// ```
 pub struct SwarmBuilder {
     client: Option<Client>,
     api_key: Option<String>,
@@ -43,15 +76,22 @@ pub struct SwarmBuilder {
 }
 
 impl SwarmBuilder {
+    /// Creates a new SwarmBuilder instance with default configuration
     pub fn new() -> Self {
+        let config = SwarmConfig::default();
         SwarmBuilder {
             client: None,
             api_key: None,
             agents: HashMap::new(),
-            config: SwarmConfig::default(),
+            config,
         }
     }
 
+    /// Sets a custom configuration for the Swarm
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - A SwarmConfig instance containing custom configuration values
     pub fn with_config(mut self, config: SwarmConfig) -> Self {
         self.config = config;
         self
@@ -112,6 +152,19 @@ impl SwarmBuilder {
         self
     }
 
+    /// Builds the Swarm instance with the configured settings
+    ///
+    /// # Returns
+    ///
+    /// Returns a Result containing either the configured Swarm instance
+    /// or a SwarmError if validation fails
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if:
+    /// - API key is missing or invalid
+    /// - API URL validation fails
+    /// - Configuration validation fails
     pub fn build(self) -> SwarmResult<Swarm> {
         // Get API key from builder or environment
         let api_key = self.api_key.unwrap_or_else(|| {
@@ -154,9 +207,39 @@ impl SwarmBuilder {
             config: self.config
         })
     }
+
+    // Add validation method
+    #[allow(dead_code)]
+    fn validate(&self) -> SwarmResult<()> {
+        // Validate API key if present
+        if let Some(ref key) = self.api_key {
+            if key.trim().is_empty() || !key.starts_with("sk-") {
+                return Err(SwarmError::ValidationError("Invalid API key format".to_string()));
+            }
+        }
+
+        // Validate config
+        self.config.validate()?;
+
+        Ok(())
+    }
 }
 
 impl Swarm {
+    /// Creates a new SwarmBuilder instance
+    ///
+    /// This is the recommended way to create a new Swarm instance.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rswarm::Swarm;
+    ///
+    /// let swarm = Swarm::builder()
+    ///     .with_api_key("your-api-key".to_string())
+    ///     .build()
+    ///     .expect("Failed to create Swarm");
+    /// ```
     pub fn builder() -> SwarmBuilder {
         SwarmBuilder::new()
     }
@@ -179,6 +262,28 @@ impl Swarm {
         builder.build()
     }
 
+    /// Makes a chat completion request to the OpenAI API
+    ///
+    /// # Arguments
+    ///
+    /// * `agent` - The Agent configuration to use for the request
+    /// * `history` - Vector of previous messages in the conversation
+    /// * `context_variables` - Variables to be used in the conversation context
+    /// * `model_override` - Optional model to use instead of the agent's default
+    /// * `stream` - Whether to stream the response
+    /// * `debug` - Whether to enable debug output
+    ///
+    /// # Returns
+    ///
+    /// Returns a Result containing either the ChatCompletionResponse or a SwarmError
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if:
+    /// - API key is invalid or empty
+    /// - Message history is empty
+    /// - Network request fails
+    /// - Response parsing fails
     pub async fn get_chat_completion(
         &self,
         agent: &Agent,
@@ -564,6 +669,28 @@ impl Swarm {
             .ok_or_else(|| SwarmError::AgentNotFoundError(name.to_string()))
     }
 
+    /// Executes a conversation with an AI agent
+    ///
+    /// # Arguments
+    ///
+    /// * `agent` - The Agent to use for the conversation
+    /// * `messages` - Initial messages to start the conversation
+    /// * `context_variables` - Variables to be used in the conversation
+    /// * `model_override` - Optional model to use instead of the agent's default
+    /// * `stream` - Whether to stream the response
+    /// * `debug` - Whether to enable debug output
+    /// * `max_turns` - Maximum number of conversation turns
+    ///
+    /// # Returns
+    ///
+    /// Returns a Result containing either the Response or a SwarmError
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if:
+    /// - Input validation fails
+    /// - Max turns exceeds configuration limits
+    /// - API requests fail
     pub async fn run(
         &self,
         mut agent: Agent,
@@ -670,6 +797,17 @@ impl SwarmConfig {
         }
         if self.valid_model_prefixes.is_empty() {
             return Err(SwarmError::ValidationError("valid_model_prefixes cannot be empty".to_string()));
+        }
+        if self.request_timeout < MIN_REQUEST_TIMEOUT || self.request_timeout > MAX_REQUEST_TIMEOUT {
+            return Err(SwarmError::ValidationError(
+                format!("request_timeout must be between {} and {} seconds",
+                    MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT)
+            ));
+        }
+        if self.loop_control.default_max_iterations == 0 {
+            return Err(SwarmError::ValidationError(
+                "default_max_iterations must be greater than 0".to_string()
+            ));
         }
         Ok(())
     }

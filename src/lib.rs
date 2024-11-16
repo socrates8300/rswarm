@@ -6,7 +6,7 @@ pub mod util;
 pub mod validation;
 
 pub use crate::core::Swarm;
-pub use crate::types::{Agent, Instructions, Response, SwarmConfig};
+pub use crate::types::{Agent, Instructions, Message, Response, SwarmConfig};
 
 pub mod error;
 pub use error::{SwarmError, SwarmResult};
@@ -47,7 +47,14 @@ async fn test_swarm_builder() -> Result<()> {
         .with_config(config)
         .build()?;
 
-    let messages = Vec::new();
+    // Create an initial message
+    let messages = vec![Message {
+        role: "user".to_string(),
+        content: Some("Hello, this is a test message.".to_string()),
+        name: None,
+        function_call: None,
+    }];
+
     let context_variables = HashMap::new();
 
     let response = swarm
@@ -58,11 +65,30 @@ async fn test_swarm_builder() -> Result<()> {
             Some("gpt-4".to_string()),
             false,
             false,
-            usize::MAX,
+            10,
         )
         .await?;
 
     assert!(!response.messages.is_empty(), "No messages returned from Swarm.");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_swarm_builder() {
+        let result = Swarm::builder()
+            .with_api_key("sk-test".to_string())
+            .with_max_loop_iterations(100)
+            .build();
+
+        assert!(result.is_ok());
+
+        let swarm = result.unwrap();
+        assert_eq!(swarm.api_key, "sk-test");
+        assert_eq!(swarm.config.max_loop_iterations, 100);
+    }
 }

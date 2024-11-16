@@ -10,3 +10,8 @@ pub const VALID_API_URL_PREFIXES: [&str; 2] = [
     "https://api.azure.com/openai",
 ];
 pub const DEFAULT_API_VERSION: &str = "v1";
+pub const DEFAULT_MAX_LOOP_ITERATIONS: u32 = 10;
+pub const DEFAULT_ITERATION_DELAY_MS: u64 = 100;
+pub const DEFAULT_BREAK_CONDITIONS: [&str; 1] = ["end_loop"];
+pub const MIN_REQUEST_TIMEOUT: u64 = 5;
+pub const MAX_REQUEST_TIMEOUT: u64 = 300;
