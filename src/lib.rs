@@ -3,6 +3,7 @@ pub mod constants;
 pub mod core;
 pub mod types;
 pub mod util;
+pub mod validation;
 
 pub use crate::core::Swarm;
 pub use crate::types::{Agent, Instructions, Response};
@@ -20,15 +21,14 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_swarm_run() -> Result<()> {
-    // Load environment variables from .env file
     dotenv().ok();
-    // Define a test API key (use a valid key or mock the Swarm for real tests)
-    let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY not set");
-    // Define the model to be used
+
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .map_err(|_| SwarmError::ConfigError("OPENAI_API_KEY not set".to_string()))?;
+
     let model = "gpt-4".to_string();
-    // Define a test prompt
     let prompt = "This is a test prompt for the Swarm agent.".to_string();
-    // Create an agent with the test prompt as instructions
+
     let agent = Agent {
         name: "TestAgent".to_string(),
         model: model.clone(),
@@ -37,32 +37,31 @@ async fn test_swarm_run() -> Result<()> {
         function_call: None,
         parallel_tool_calls: true,
     };
-    // Initialize empty messages and context variables
+
     let messages = Vec::new();
     let context_variables = HashMap::new();
-    // Create a Swarm instance with the test API key
+
     let swarm = Swarm::new(None, Some(api_key.to_string()), HashMap::new())?;
-    // Run the swarm with the agent
+
     let response = swarm
         .run(
             agent,
             messages,
             context_variables,
-            Some(model), // Model override
-            false,       // Do not stream
-            false,       // Debug mode off
-            usize::MAX,  // Max turns
+            Some(model),
+            false,
+            false,
+            usize::MAX,
         )
         .await?;
-    // Assert that the response contains messages
-    assert!(
-        !response.messages.is_empty(),
-        "No messages returned from Swarm."
-    );
-    // Optionally, print the response messages for debugging
+
+    assert!(!response.messages.is_empty(), "No messages returned from Swarm.");
+
     for message in response.messages {
-        println!("{}: {}", message.role, message.content.unwrap_or_default());
+        if let Some(content) = message.content {
+            println!("{}: {}", message.role, content);
+        }
     }
+
     Ok(())
 }
-

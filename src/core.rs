@@ -8,7 +8,6 @@ use crate::types::{
     Message, Response, ResultType,
 };
 
-use anyhow::Result;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -18,6 +17,7 @@ use std::env;
 use crate::types::{Step, Steps};
 use crate::util::{debug_print, extract_xml_steps, function_to_json, parse_steps_from_xml};
 use crate::error::{SwarmError, SwarmResult};
+use crate::validation::validate_api_request;
 
 impl Default for Swarm {
     fn default() -> Self {
@@ -39,8 +39,10 @@ impl Swarm {
         agents: HashMap<String, Agent>, // Pass agents during initialization
     ) -> SwarmResult<Self> {
         // Validate API key
-        let api_key = api_key.unwrap_or_else(|| env::var("OPENAI_API_KEY")
-            .expect("OPENAI_API_KEY must be set either in environment or passed to new()"));
+        let api_key = api_key.unwrap_or_else(|| {
+            env::var("OPENAI_API_KEY")
+                .unwrap_or_else(|_| panic!("OPENAI_API_KEY must be set either in environment or passed to new()"))
+        });
 
         // Validate API key is not empty and has valid format
         if api_key.trim().is_empty() {
@@ -451,7 +453,10 @@ impl Swarm {
         stream: bool,
         debug: bool,
         max_turns: usize,
-    ) -> Result<Response> {
+    ) -> SwarmResult<Response> {
+        // Add validation before processing
+        validate_api_request(&agent, &messages, &model_override, max_turns)?;
+
         // Extract XML steps from the agent's instructions
         let instructions = match &agent.instructions {
             Instructions::Text(text) => text.clone(),
