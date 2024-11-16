@@ -1,0 +1,484 @@
+// rswarm/src/core.rs
+
+use crate::constants::{
+    CTX_VARS_NAME, OPENAI_DEFAULT_API_URL, ROLE_ASSISTANT, ROLE_FUNCTION, ROLE_SYSTEM,
+};
+use crate::types::{
+    Agent, AgentFunction, ChatCompletionResponse, ContextVariables, FunctionCall, Instructions,
+    Message, Response, ResultType,
+};
+
+use anyhow::{anyhow, Result};
+use futures::StreamExt;
+use reqwest::Client;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::env;
+
+use crate::types::{Step, Steps};
+use crate::util::{debug_print, extract_xml_steps, function_to_json, parse_steps_from_xml};
+
+impl Default for Swarm {
+    fn default() -> Self {
+        Swarm::new(None, None, HashMap::new())
+    }
+}
+
+pub struct Swarm {
+    pub client: Client,
+    pub api_key: String,
+    agent_registry: HashMap<String, Agent>, // New field
+}
+
+impl Swarm {
+    pub fn new(
+        client: Option<Client>,
+        api_key: Option<String>,
+        agents: HashMap<String, Agent>, // Pass agents during initialization
+    ) -> Self {
+        Swarm {
+            client: client.unwrap_or_else(Client::new),
+            api_key: api_key.unwrap_or_default(),
+            agent_registry: agents, // Initialize the agent registry
+        }
+    }
+
+    pub async fn get_chat_completion(
+        &self,
+        agent: &Agent,
+        history: &[Message],
+        context_variables: &ContextVariables,
+        model_override: Option<String>,
+        stream: bool,
+        debug: bool,
+    ) -> Result<ChatCompletionResponse> {
+        let instructions = match &agent.instructions {
+            Instructions::Text(text) => text.clone(),
+            Instructions::Function(func) => func(context_variables.clone()),
+        };
+
+        let mut messages = vec![Message {
+            role: ROLE_SYSTEM.to_string(),
+            content: Some(instructions),
+            name: None,
+            function_call: None,
+        }];
+
+        messages.extend_from_slice(history);
+
+        debug_print(
+            debug,
+            &format!("Getting chat completion for...: {:?}", messages),
+        );
+
+        // Convert agent functions to functions for the API
+        let functions: Vec<Value> = agent.functions.iter().map(function_to_json).collect();
+
+        let model = model_override.unwrap_or_else(|| agent.model.clone());
+
+        let mut request_body = json!({
+            "model": model,
+            "messages": messages,
+        });
+
+        if !functions.is_empty() {
+            request_body["functions"] = Value::Array(functions);
+        }
+
+        if let Some(function_call) = &agent.function_call {
+            request_body["function_call"] = json!(function_call);
+        }
+
+        if stream {
+            request_body["stream"] = json!(true);
+        }
+
+        let url = env::var("OPENAI_API_URL").unwrap_or_else(|_| OPENAI_DEFAULT_API_URL.to_string());
+
+        // Make the API request to OpenAI
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(&self.api_key)
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if stream {
+            // Handle streaming response
+            let mut stream = response.bytes_stream();
+
+            let mut full_response = ChatCompletionResponse {
+                id: "".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                choices: Vec::new(),
+                usage: None,
+            };
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(data) => {
+                        let text = String::from_utf8_lossy(&data);
+
+                        for line in text.lines() {
+                            if line.starts_with("data: ") {
+                                let json_str = line[6..].trim();
+                                if json_str == "[DONE]" {
+                                    break;
+                                }
+                                let partial_response: serde_json::Result<ChatCompletionResponse> =
+                                    serde_json::from_str(json_str);
+                                if let Ok(partial) = partial_response {
+                                    // Merge partial into full_response
+                                    full_response.choices.extend(partial.choices);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(anyhow!("Error reading streaming response: {}", e));
+                    }
+                }
+            }
+
+            Ok(full_response)
+        } else {
+            let response_json = response.json::<ChatCompletionResponse>().await?;
+            Ok(response_json)
+        }
+    }
+
+    pub fn handle_function_result(&self, result: ResultType, debug: bool) -> Result<ResultType> {
+        match result {
+            ResultType::Value(_) | ResultType::Agent(_) => Ok(result),
+            _ => {
+                let error_message = format!(
+                    "Failed to cast response to string: {:?}. \
+                    Make sure agent functions return a string or ResultType object.",
+                    result
+                );
+                debug_print(debug, &error_message);
+                Err(anyhow!(error_message))
+            }
+        }
+    }
+
+    pub fn handle_function_call(
+        &self,
+        function_call: &FunctionCall,
+        functions: &[AgentFunction],
+        context_variables: &mut ContextVariables,
+        debug: bool,
+    ) -> Result<Response> {
+        // Validate function_call.name
+        if function_call.name.trim().is_empty() {
+            return Err(anyhow!("Function call name cannot be empty."));
+        }
+
+        let mut function_map = HashMap::new();
+        for func in functions {
+            function_map.insert(func.name.clone(), func.clone());
+        }
+
+        let mut response = Response {
+            messages: Vec::new(),
+            agent: None,
+            context_variables: HashMap::new(),
+        };
+
+        let name = &function_call.name;
+        if let Some(func) = function_map.get(name) {
+            let args: ContextVariables = serde_json::from_str(&function_call.arguments)?;
+            debug_print(
+                debug,
+                &format!(
+                    "Processing function call: {} with arguments {:?}",
+                    name, args
+                ),
+            );
+
+            let mut args = args.clone();
+            if func.accepts_context_variables {
+                let serialized_context = serde_json::to_string(&context_variables)?;
+                args.insert(CTX_VARS_NAME.to_string(), serialized_context);
+            }
+
+            let raw_result = (func.function)(args)?;
+
+            let result = self.handle_function_result(raw_result, debug)?;
+
+            response.messages.push(Message {
+                role: ROLE_FUNCTION.to_string(),
+                name: Some(name.clone()),
+                content: Some(result.get_value()),
+                function_call: None,
+            });
+
+            response
+                .context_variables
+                .extend(result.get_context_variables());
+            if let Some(agent) = result.get_agent() {
+                response.agent = Some(agent);
+            }
+        } else {
+            debug_print(debug, &format!("Function {} not found.", name));
+            response.messages.push(Message {
+                role: ROLE_ASSISTANT.to_string(),
+                name: Some(name.clone()),
+                content: Some(format!("Error: Function {} not found.", name)),
+                function_call: None,
+            });
+        }
+
+        Ok(response)
+    }
+
+    async fn single_execution(
+        &self,
+        agent: &Agent,
+        history: &mut Vec<Message>,
+        context_variables: &mut ContextVariables,
+        model_override: Option<String>,
+        stream: bool,
+        debug: bool,
+    ) -> Result<Response> {
+        let completion = self
+            .get_chat_completion(
+                agent,
+                &history.clone(),
+                context_variables,
+                model_override.clone(),
+                stream,
+                debug,
+            )
+            .await?;
+
+        if completion.choices.is_empty() {
+            return Err(anyhow!("No choices returned from the model."));
+        }
+
+        let choice = &completion.choices[0];
+        let message = choice.message.clone();
+
+        history.push(message.clone());
+
+        // Handle function calls if any
+        if let Some(function_call) = &message.function_call {
+            let func_response = self.handle_function_call(
+                function_call,
+                &agent.functions,
+                context_variables,
+                debug,
+            )?;
+
+            history.extend(func_response.messages.clone());
+            context_variables.extend(func_response.context_variables);
+
+            // If the function returns a new agent, we need to handle it
+            // (In this implementation, we are not changing the agent here)
+        }
+
+        Ok(Response {
+            messages: vec![message],
+            agent: Some(agent.clone()),
+            context_variables: context_variables.clone(),
+        })
+    }
+
+    async fn execute_step(
+        &self,
+        agent: &mut Agent,
+        history: &mut Vec<Message>,
+        context_variables: &mut ContextVariables,
+        model_override: Option<String>,
+        stream: bool,
+        debug: bool,
+        max_turns: usize,
+        step_number: usize,
+        step: &Step,
+    ) -> Result<Response> {
+        println!("Executing Step {}", step_number);
+
+        // Handle agent handoff if an agent is specified in the step
+        if let Some(agent_name) = &step.agent {
+            println!("Switching to agent: {}", agent_name);
+            *agent = self.get_agent_by_name(agent_name)?;
+        }
+
+        match step.action.as_str() {
+            "run_once" => {
+                // Prepare a message with the step's prompt
+                let step_message = Message {
+                    role: "user".to_string(),
+                    content: Some(step.prompt.clone()),
+                    name: None,
+                    function_call: None,
+                };
+
+                history.push(step_message);
+
+                // Proceed with a single execution
+                self.single_execution(
+                    agent,
+                    history,
+                    context_variables,
+                    model_override.clone(),
+                    stream,
+                    debug,
+                )
+                .await
+            }
+            "loop" => {
+                let mut iteration_count = 0;
+                let max_iterations = 10; // Define a suitable maximum
+
+                loop {
+                    iteration_count += 1;
+
+                    // Prepare a message with the step's prompt
+                    let step_message = Message {
+                        role: "user".to_string(),
+                        content: Some(step.prompt.clone()),
+                        name: None,
+                        function_call: None,
+                    };
+
+                    history.push(step_message);
+
+                    let response = self
+                        .single_execution(
+                            agent,
+                            history,
+                            context_variables,
+                            model_override.clone(),
+                            stream,
+                            debug,
+                        )
+                        .await?;
+
+                    // Handle agent change within the response
+                    if let Some(new_agent) = response.agent.clone() {
+                        *agent = new_agent;
+                    }
+
+                    // Decide when to break the loop
+                    if context_variables.get("end_loop") == Some(&"true".to_string()) {
+                        println!("Loop termination condition met.");
+                        break;
+                    }
+
+                    // Prevent infinite loops with a max iteration count
+                    if iteration_count >= max_iterations {
+                        println!("Reached maximum loop iterations.");
+                        break;
+                    }
+
+                    // Optional: Add a condition to prevent exceeding max_turns
+                    if history.len() >= max_turns {
+                        println!("Max turns reached in loop, exiting.");
+                        break;
+                    }
+                }
+                Ok(Response {
+                    messages: history.clone(),
+                    agent: Some(agent.clone()),
+                    context_variables: context_variables.clone(),
+                })
+            }
+            _ => {
+                println!("Unknown action: {}", step.action);
+                Err(anyhow!("Unknown action: {}", step.action))
+            }
+        }
+    }
+
+    pub fn get_agent_by_name(&self, name: &str) -> Result<Agent> {
+        if let Some(agent) = self.agent_registry.get(name) {
+            Ok(agent.clone())
+        } else {
+            Err(anyhow!("Agent '{}' not found", name))
+        }
+    }
+
+    pub async fn run(
+        &self,
+        mut agent: Agent,
+        messages: Vec<Message>,
+        mut context_variables: ContextVariables,
+        model_override: Option<String>,
+        stream: bool,
+        debug: bool,
+        max_turns: usize,
+    ) -> Result<Response> {
+        // Extract XML steps from the agent's instructions
+        let instructions = match &agent.instructions {
+            Instructions::Text(text) => text.clone(),
+            Instructions::Function(func) => func(context_variables.clone()),
+        };
+
+        let (instructions_without_xml, xml_steps) = extract_xml_steps(&instructions);
+
+        // Parse the steps from XML
+        let steps = if let Some(xml_content) = xml_steps {
+            parse_steps_from_xml(&xml_content)?
+        } else {
+            Steps { steps: Vec::new() }
+        };
+
+        // Set the agent's instructions without the XML steps
+        agent.instructions = Instructions::Text(instructions_without_xml);
+
+        // Prepare history
+        let mut history = messages.clone();
+
+        // If there are steps, execute them
+        if !steps.steps.is_empty() {
+            for step in &steps.steps {
+                let response = self
+                    .execute_step(
+                        &mut agent,
+                        &mut history,
+                        &mut context_variables,
+                        model_override.clone(),
+                        stream,
+                        debug,
+                        max_turns,
+                        step.number,
+                        step,
+                    )
+                    .await?;
+
+                // Handle agent change
+                if let Some(new_agent) = response.agent {
+                    agent = new_agent;
+                }
+
+                // Optionally handle context variables or messages after each step
+            }
+        } else {
+            // No steps, proceed with a default execution if necessary
+            println!("No steps defined. Executing default behavior.");
+
+            let response = self
+                .single_execution(
+                    &agent,
+                    &mut history,
+                    &mut context_variables,
+                    model_override,
+                    stream,
+                    debug,
+                )
+                .await?;
+
+            history.extend(response.messages);
+            context_variables.extend(response.context_variables);
+        }
+
+        Ok(Response {
+            messages: history,
+            agent: Some(agent),
+            context_variables,
+        })
+    }
+}
