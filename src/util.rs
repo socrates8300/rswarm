@@ -1,5 +1,5 @@
 use crate::types::{AgentFunction, FunctionCall, Message, Steps};
-use anyhow::Result;
+use crate::error::{SwarmError, SwarmResult};
 use quick_xml::de::from_str as xml_from_str;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -37,31 +37,32 @@ pub fn merge_chunk_message(message: &mut Message, delta: &serde_json::Map<String
     }
 }
 
-pub fn function_to_json(func: &AgentFunction) -> Value {
+pub fn function_to_json(func: &AgentFunction) -> SwarmResult<Value> {
     let parameters = json!({
         "type": "object",
-        "properties": {}, // Fill in parameter details if needed
-        "required": [],   // Fill in required parameters
+        "properties": {},
+        "required": [],
     });
 
-    json!({
+    Ok(json!({
         "name": func.name,
-        "description": "", // Add description if available
+        "description": "",
         "parameters": parameters,
-    })
+    }))
 }
 
-pub fn parse_steps_from_xml(xml_content: &str) -> Result<Steps> {
-    let steps: Steps = xml_from_str(xml_content)?;
-    Ok(steps)
+pub fn parse_steps_from_xml(xml_content: &str) -> SwarmResult<Steps> {
+    xml_from_str(xml_content)
+        .map_err(|e| SwarmError::XmlError(format!("Failed to parse XML steps: {}", e)))
 }
 
-pub fn extract_xml_steps(instructions: &str) -> (String, Option<String>) {
+pub fn extract_xml_steps(instructions: &str) -> SwarmResult<(String, Option<String>)> {
     let mut instructions_without_xml = instructions.to_string();
     let mut xml_steps = None;
 
     // Improved regex to be more robust
-    let re = Regex::new(r"(?s)<steps\b[^>]*>.*?</steps>").unwrap();
+    let re = Regex::new(r"(?s)<steps\b[^>]*>.*?</steps>")
+        .map_err(|e| SwarmError::Other(format!("Invalid regex pattern: {}", e)))?;
 
     if let Some(mat) = re.find(&instructions) {
         let xml_content = mat.as_str();
@@ -69,5 +70,5 @@ pub fn extract_xml_steps(instructions: &str) -> (String, Option<String>) {
         xml_steps = Some(xml_content.to_string());
     }
 
-    (instructions_without_xml.trim().to_string(), xml_steps)
+    Ok((instructions_without_xml.trim().to_string(), xml_steps))
 }

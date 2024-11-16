@@ -17,6 +17,7 @@ use std::env;
 
 use crate::types::{Step, Steps};
 use crate::util::{debug_print, extract_xml_steps, function_to_json, parse_steps_from_xml};
+use crate::error::{SwarmError, SwarmResult};
 
 impl Default for Swarm {
     fn default() -> Self {
@@ -51,7 +52,7 @@ impl Swarm {
         model_override: Option<String>,
         stream: bool,
         debug: bool,
-    ) -> Result<ChatCompletionResponse> {
+    ) -> SwarmResult<ChatCompletionResponse> {
         let instructions = match &agent.instructions {
             Instructions::Text(text) => text.clone(),
             Instructions::Function(func) => func(context_variables.clone()),
@@ -72,7 +73,9 @@ impl Swarm {
         );
 
         // Convert agent functions to functions for the API
-        let functions: Vec<Value> = agent.functions.iter().map(function_to_json).collect();
+        let functions: Vec<Value> = agent.functions.iter()
+            .map(function_to_json)
+            .collect::<SwarmResult<Vec<Value>>>()?;
 
         let model = model_override.unwrap_or_else(|| agent.model.clone());
 
@@ -102,7 +105,8 @@ impl Swarm {
             .bearer_auth(&self.api_key)
             .json(&request_body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| SwarmError::NetworkError(e.to_string()))?;
 
         if stream {
             // Handle streaming response
@@ -137,19 +141,19 @@ impl Swarm {
                         }
                     }
                     Err(e) => {
-                        return Err(anyhow!("Error reading streaming response: {}", e));
+                        return Err(SwarmError::StreamError(format!("Error reading streaming response: {}", e)));
                     }
                 }
             }
 
             Ok(full_response)
         } else {
-            let response_json = response.json::<ChatCompletionResponse>().await?;
-            Ok(response_json)
+            response.json::<ChatCompletionResponse>().await
+                .map_err(|e| SwarmError::DeserializationError(e.to_string()))
         }
     }
 
-    pub fn handle_function_result(&self, result: ResultType, debug: bool) -> Result<ResultType> {
+    pub fn handle_function_result(&self, result: ResultType, debug: bool) -> SwarmResult<ResultType> {
         match result {
             ResultType::Value(_) | ResultType::Agent(_) => Ok(result),
             _ => {
@@ -159,7 +163,7 @@ impl Swarm {
                     result
                 );
                 debug_print(debug, &error_message);
-                Err(anyhow!(error_message))
+                Err(SwarmError::FunctionError(error_message))
             }
         }
     }
@@ -170,10 +174,10 @@ impl Swarm {
         functions: &[AgentFunction],
         context_variables: &mut ContextVariables,
         debug: bool,
-    ) -> Result<Response> {
+    ) -> SwarmResult<Response> {
         // Validate function_call.name
         if function_call.name.trim().is_empty() {
-            return Err(anyhow!("Function call name cannot be empty."));
+            return Err(SwarmError::ValidationError("Function call name cannot be empty.".to_string()));
         }
 
         let mut function_map = HashMap::new();
@@ -393,12 +397,11 @@ impl Swarm {
         }
     }
 
-    pub fn get_agent_by_name(&self, name: &str) -> Result<Agent> {
-        if let Some(agent) = self.agent_registry.get(name) {
-            Ok(agent.clone())
-        } else {
-            Err(anyhow!("Agent '{}' not found", name))
-        }
+    pub fn get_agent_by_name(&self, name: &str) -> SwarmResult<Agent> {
+        self.agent_registry
+            .get(name)
+            .cloned()
+            .ok_or_else(|| SwarmError::AgentNotFoundError(name.to_string()))
     }
 
     pub async fn run(
@@ -417,7 +420,7 @@ impl Swarm {
             Instructions::Function(func) => func(context_variables.clone()),
         };
 
-        let (instructions_without_xml, xml_steps) = extract_xml_steps(&instructions);
+        let (instructions_without_xml, xml_steps) = extract_xml_steps(&instructions)?;
 
         // Parse the steps from XML
         let steps = if let Some(xml_content) = xml_steps {

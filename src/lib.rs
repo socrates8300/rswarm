@@ -7,6 +7,9 @@ pub mod util;
 pub use crate::core::Swarm;
 pub use crate::types::{Agent, Instructions, Response};
 
+pub mod error;
+pub use error::{SwarmError, SwarmResult};
+
 #[allow(unused_imports, unused_variables, dead_code)]
 use anyhow::Result;
 
