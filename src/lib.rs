@@ -41,7 +41,7 @@ async fn test_swarm_run() -> Result<()> {
     let messages = Vec::new();
     let context_variables = HashMap::new();
     // Create a Swarm instance with the test API key
-    let swarm = Swarm::new(None, Some(api_key.to_string()), HashMap::new());
+    let swarm = Swarm::new(None, Some(api_key.to_string()), HashMap::new())?;
     // Run the swarm with the agent
     let response = swarm
         .run(

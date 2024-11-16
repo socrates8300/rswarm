@@ -8,7 +8,7 @@ use crate::types::{
     Message, Response, ResultType,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -22,6 +22,7 @@ use crate::error::{SwarmError, SwarmResult};
 impl Default for Swarm {
     fn default() -> Self {
         Swarm::new(None, None, HashMap::new())
+            .expect("Default initialization should never fail")
     }
 }
 
@@ -36,12 +37,24 @@ impl Swarm {
         client: Option<Client>,
         api_key: Option<String>,
         agents: HashMap<String, Agent>, // Pass agents during initialization
-    ) -> Self {
-        Swarm {
-            client: client.unwrap_or_else(Client::new),
-            api_key: api_key.unwrap_or_default(),
-            agent_registry: agents, // Initialize the agent registry
+    ) -> SwarmResult<Self> {
+        // Validate API key
+        let api_key = api_key.unwrap_or_else(|| env::var("OPENAI_API_KEY")
+            .expect("OPENAI_API_KEY must be set either in environment or passed to new()"));
+
+        // Validate API key is not empty and has valid format
+        if api_key.trim().is_empty() {
+            return Err(SwarmError::ValidationError("API key cannot be empty".to_string()));
         }
+        if !api_key.starts_with("sk-") {
+            return Err(SwarmError::ValidationError("Invalid API key format".to_string()));
+        }
+
+        Ok(Swarm {
+            client: client.unwrap_or_else(Client::new),
+            api_key,
+            agent_registry: agents,
+        })
     }
 
     pub async fn get_chat_completion(
@@ -53,6 +66,15 @@ impl Swarm {
         stream: bool,
         debug: bool,
     ) -> SwarmResult<ChatCompletionResponse> {
+        // Validate inputs
+        if self.api_key.is_empty() {
+            return Err(SwarmError::ValidationError("API key cannot be empty".to_string()));
+        }
+
+        if history.is_empty() {
+            return Err(SwarmError::ValidationError("Message history cannot be empty".to_string()));
+        }
+
         let instructions = match &agent.instructions {
             Instructions::Text(text) => text.clone(),
             Instructions::Function(func) => func(context_variables.clone()),
@@ -96,7 +118,14 @@ impl Swarm {
             request_body["stream"] = json!(true);
         }
 
-        let url = env::var("OPENAI_API_URL").unwrap_or_else(|_| OPENAI_DEFAULT_API_URL.to_string());
+        let url = env::var("OPENAI_API_URL")
+            .map(|url| {
+                if !url.starts_with("https://") {
+                    return Err(SwarmError::ValidationError("OPENAI_API_URL must start with https://".to_string()));
+                }
+                Ok(url)
+            })
+            .unwrap_or_else(|_| Ok(OPENAI_DEFAULT_API_URL.to_string()))?;
 
         // Make the API request to OpenAI
         let response = self
@@ -246,7 +275,7 @@ impl Swarm {
         model_override: Option<String>,
         stream: bool,
         debug: bool,
-    ) -> Result<Response> {
+    ) -> SwarmResult<Response> {
         let completion = self
             .get_chat_completion(
                 agent,
@@ -259,7 +288,7 @@ impl Swarm {
             .await?;
 
         if completion.choices.is_empty() {
-            return Err(anyhow!("No choices returned from the model."));
+            return Err(SwarmError::ApiError("No choices returned from the model".to_string()));
         }
 
         let choice = &completion.choices[0];
@@ -301,7 +330,16 @@ impl Swarm {
         max_turns: usize,
         step_number: usize,
         step: &Step,
-    ) -> Result<Response> {
+    ) -> SwarmResult<Response> {
+        // Validate step
+        if step.prompt.trim().is_empty() {
+            return Err(SwarmError::ValidationError("Step prompt cannot be empty".to_string()));
+        }
+
+        if step.number == 0 {
+            return Err(SwarmError::ValidationError("Step number must be greater than 0".to_string()));
+        }
+
         println!("Executing Step {}", step_number);
 
         // Handle agent handoff if an agent is specified in the step
@@ -392,7 +430,7 @@ impl Swarm {
             }
             _ => {
                 println!("Unknown action: {}", step.action);
-                Err(anyhow!("Unknown action: {}", step.action))
+                Err(SwarmError::ValidationError(format!("Unknown action: {}", step.action)))
             }
         }
     }
