@@ -25,7 +25,7 @@ In your `Cargo.toml` file, add:
 
 ```toml
 [dependencies]
-rswarm = "0.1.0"  # Replace with the latest version
+rswarm ={ git = "https://github.com/socrates8300/rswarm.git" }
 ```
 
 After updating `Cargo.toml`, fetch the dependencies by running:
