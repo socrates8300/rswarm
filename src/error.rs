@@ -1,3 +1,4 @@
+// ./src/error.rs
 /// Error types for the Swarm library
 ///
 /// This module provides a comprehensive error handling system for all operations

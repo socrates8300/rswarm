@@ -1,5 +1,5 @@
 // #![allow(unused, dead_code)]  // TODO: Remove unused and dead code
-// ./types.rs
+// ./src/types.rs
 
 use anyhow::Result;
 use crate::constants::{OPENAI_DEFAULT_API_URL, DEFAULT_API_VERSION, DEFAULT_REQUEST_TIMEOUT, DEFAULT_CONNECT_TIMEOUT, VALID_API_URL_PREFIXES};

@@ -1152,6 +1152,7 @@ dependencies = [
  "chrono",
  "dotenv",
  "futures",
+ "lazy_static",
  "mockito",
  "quick-xml",
  "regex",

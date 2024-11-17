@@ -820,6 +820,13 @@ mod tests {
     use super::*;
     use mockito::{ServerGuard, Mock};
     use serde_json::json;
+    use lazy_static::lazy_static;
+    use crate::constants::OpenAICredentials;
+
+    lazy_static! {
+        static ref CREDS_OPENAI: OpenAICredentials = OpenAICredentials::get_openai_credentials();
+    }
+    // const CredsOpenAI: OpenAICredentials = OpenAICredentials::get_openai_credentials();
 
     /// Creates a mock server and returns its URL
     fn setup_mock_server() -> (ServerGuard, String) {

@@ -1,3 +1,4 @@
+// ./src/util.rs
 /// Utility functions for the Swarm library
 ///
 /// This module provides various helper functions for debugging, message handling,
