@@ -246,9 +246,32 @@ Agents can call functions during conversations to perform specific tasks.
 
 #### Implementing Function Handling
 
+First, define a function:
 ```rust
-use rswarm::Message;
+use rswarm::{AgentFunction, ContextVariables, ResultType};
+use std::sync::Arc;
 
+// Define the echo function
+let echo_function = AgentFunction {
+    name: "echo".to_string(),
+    function: Arc::new(|args: ContextVariables| {
+        let message = args.get("message").cloned().unwrap_or_default();
+        Ok(ResultType::Value(message))
+    }),
+    accepts_context_variables: true,
+};
+
+// Add the function to the agent
+let mut agent = Agent {
+    name: "assistant".to_string(),
+    model: "gpt-3.5-turbo".to_string(),
+    instructions: Instructions::Text("You are a helpful assistant.".to_string()),
+    functions: vec![echo_function],  // Add the function here
+    function_call: Some("auto".to_string()),  // Allow the agent to call functions
+    parallel_tool_calls: false,
+};
+
+// Now use the agent in conversation
 let messages = vec![Message {
     role: "user".to_string(),
     content: Some("Repeat after me: Hello World!".to_string()),
@@ -274,7 +297,7 @@ for msg in response.messages {
 }
 ```
 
-In this example, the agent uses the `echo` function to respond.
+In this example, we define an `echo` function that the agent can use to repeat messages. The agent will automatically decide when to use this function based on the conversation context.
 
 ### Streaming Responses
 
