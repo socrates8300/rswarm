@@ -1,4 +1,3 @@
-// #![allow(unused, dead_code)]  // TODO: Remove unused and dead code
 // ./src/types.rs
 
 use anyhow::Result;

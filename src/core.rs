@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
-#[allow(unused_imports)]
+#[cfg(test)]
 use std::sync::Arc;
 
 use crate::types::{Step, Steps};
@@ -211,8 +211,7 @@ impl SwarmBuilder {
     }
 
     // Add validation method
-    #[allow(dead_code)]
-    fn validate(&self) -> SwarmResult<()> {
+    fn _validate(&self) -> SwarmResult<()> {
         // Validate API key if present
         if let Some(ref key) = self.api_key {
             if key.trim().is_empty() || !key.starts_with("sk-") {

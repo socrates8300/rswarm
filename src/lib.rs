@@ -1,5 +1,4 @@
 // ./src/lib.rs
-#[allow(unused_imports, unused_variables, dead_code)]
 pub mod constants;
 pub mod core;
 pub mod types;
@@ -12,12 +11,12 @@ pub use crate::types::{Agent, Instructions, Message, Response, SwarmConfig};
 pub mod error;
 pub use error::{SwarmError, SwarmResult};
 
-#[allow(unused_imports, unused_variables, dead_code)]
-use anyhow::Result;
 
-#[allow(unused_imports, unused_variables, dead_code)]
+#[cfg(test)]
+use anyhow::Result;
+#[cfg(test)]
 use dotenv::dotenv;
-#[allow(unused_imports, unused_variables, dead_code)]
+#[cfg(test)]
 use std::collections::HashMap;
 
 #[tokio::test]
