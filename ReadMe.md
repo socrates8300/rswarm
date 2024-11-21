@@ -16,6 +16,18 @@ rswarm is a Rust library crafted to streamline AI agent interactions, particular
 
 Whether you’re building a chatbot, an AI assistant, or any application requiring intelligent dialogue, rswarm equips you with the tools to make it happen efficiently.
 
+## Acknowledgments
+
+This project, rswarm, is inspired by and extends the concepts introduced in the [Swarm](https://github.com/openai/swarm) framework developed by OpenAI. Swarm is an educational framework that explores ergonomic, lightweight multi-agent orchestration. It provides a foundation for agent coordination and execution through abstractions like Agents and handoffs, allowing for scalable and customizable solutions.
+
+We would like to express our gratitude to the OpenAI team for their innovative work on Swarm, which has significantly influenced the development of rswarm. Special thanks to the core contributors of Swarm, including Ilan Bigio, James Hills, Shyamal Anadkat, Charu Jaiswal, Colin Jarvis, and Katia Gil Guzman, among others.
+
+By building upon Swarm, rswarm aims to bring these powerful concepts into the Rust ecosystem, enhancing them to suit our specific needs and preferences. We hope to continue pushing the boundaries of what's possible with Rust and AI, inspired by the groundwork laid by OpenAI.
+
+Feel free to explore the Swarm framework further, contribute to its development, or reach out with questions. Together, we can continue to innovate and expand the capabilities of AI agent interactions.
+
+Happy coding!
+
 ## Installation
 
 To get started with rswarm, you need to add it to your project’s dependencies. Ensure you have Rust and Cargo installed on your system.
