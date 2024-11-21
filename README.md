@@ -35,7 +35,10 @@ To get started with rswarm, you need to add it to your project’s dependencies.
 ### Adding rswarm to Your Project
 
 In your `Cargo.toml` file, add:
-
+```bash
+cargo add rswarm
+```
+or  
 ```toml
 [dependencies]
 rswarm = { git = "https://github.com/socrates8300/rswarm.git" }
