@@ -1443,4 +1443,107 @@ mod tests {
 
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_agent_with_valid_text_instructions() {
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "gpt-4".to_string(),
+            instructions: Instructions::Text("Valid test instructions".to_string()),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build();
+
+        assert!(result.is_ok());
+        if let Ok(swarm) = result {
+            let stored_agent = swarm.agent_registry.get("test_agent").unwrap();
+            match &stored_agent.instructions {
+                Instructions::Text(text) => assert_eq!(text, "Valid test instructions"),
+                _ => panic!("Expected Text instructions"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_agent_with_empty_text_instructions() {
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "gpt-4".to_string(),
+            instructions: Instructions::Text("".to_string()),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build();
+
+        assert!(result.is_err());
+        match result {
+            Err(SwarmError::ValidationError(msg)) => {
+                assert!(msg.contains("Agent instructions cannot be empty"));
+            }
+            _ => panic!("Expected ValidationError for empty instructions"),
+        }
+    }
+
+    #[test]
+    fn test_agent_with_whitespace_only_text_instructions() {
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "gpt-4".to_string(),
+            instructions: Instructions::Text("    \n\t    ".to_string()),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build();
+
+        assert!(result.is_err());
+        match result {
+            Err(SwarmError::ValidationError(msg)) => {
+                assert!(msg.contains("Agent instructions cannot be empty"));
+            }
+            _ => panic!("Expected ValidationError for whitespace-only instructions"),
+        }
+    }
+
+    #[test]
+    fn test_agent_with_multiline_text_instructions() {
+        let instructions = "Line 1\nLine 2\nLine 3".to_string();
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "gpt-4".to_string(),
+            instructions: Instructions::Text(instructions.clone()),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build();
+
+        assert!(result.is_ok());
+        if let Ok(swarm) = result {
+            let stored_agent = swarm.agent_registry.get("test_agent").unwrap();
+            match &stored_agent.instructions {
+                Instructions::Text(text) => assert_eq!(text.as_str(), instructions.as_str()),
+                _ => panic!("Expected Text instructions"),
+            }
+        }
+    }
 }

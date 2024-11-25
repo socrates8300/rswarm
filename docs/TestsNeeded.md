@@ -34,13 +34,13 @@
   Test creating an Agent without a name or model.  
   Expect a panic or error as per implementation. -->
 
-- **Invalid Model Prefix**  
+<!-- - **Invalid Model Prefix**  
   Test initializing an Agent with an invalid model prefix.  
-  Expect validation errors.
+  Expect validation errors. -->
 
 ### 2.2 Instruction Variants
-- **Text Instructions**  
-  Test Instructions::Text variant with valid and empty strings.
+<!-- - **Text Instructions**  
+  Test Instructions::Text variant with valid and empty strings. -->
 
 - **Function Instructions**  
   Test Instructions::Function variant with valid functions.  
