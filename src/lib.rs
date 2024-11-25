@@ -11,3 +11,4 @@ pub use crate::types::{Agent, Instructions, Message, Response, SwarmConfig};
 pub mod error;
 pub use error::{SwarmError, SwarmResult};
 
+pub mod tests;
