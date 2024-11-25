@@ -169,6 +169,9 @@ impl SwarmBuilder {
     /// - API URL validation fails
     /// - Configuration validation fails
     pub fn build(self) -> SwarmResult<Swarm> {
+        // First validate the configuration
+        self.config.validate()?;
+
         // Get API key from builder or environment
         let api_key = match self.api_key.or_else(|| env::var("OPENAI_API_KEY").ok()) {
             Some(key) => key,
@@ -811,6 +814,12 @@ impl SwarmConfig {
                 "default_max_iterations must be greater than 0".to_string()
             ));
         }
+
+        // Validate API URL format
+        if !self.api_url.starts_with("https://") {
+            return Err(SwarmError::ValidationError("API URL must start with https://".to_string()));
+        }
+
         Ok(())
     }
 }
@@ -899,5 +908,110 @@ mod tests {
             }
             _ => panic!("Expected ValidationError for missing API key"),
         }
+    }
+
+    #[test]
+    fn test_invalid_configurations() {
+        // Test cases with invalid configurations
+        let test_cases = vec![
+            (
+                SwarmConfig {
+                    request_timeout: 0,
+                    ..SwarmConfig::default()
+                },
+                "request_timeout must be greater than 0"
+            ),
+            (
+                SwarmConfig {
+                    connect_timeout: 0,
+                    ..SwarmConfig::default()
+                },
+                "connect_timeout must be greater than 0"
+            ),
+            (
+                SwarmConfig {
+                    max_retries: 0,
+                    ..SwarmConfig::default()
+                },
+                "max_retries must be greater than 0"
+            ),
+            (
+                SwarmConfig {
+                    valid_model_prefixes: vec![],
+                    ..SwarmConfig::default()
+                },
+                "valid_model_prefixes cannot be empty"
+            ),
+            (
+                SwarmConfig {
+                    request_timeout: MIN_REQUEST_TIMEOUT - 1,
+                    ..SwarmConfig::default()
+                },
+                "request_timeout must be between"
+            ),
+            (
+                SwarmConfig {
+                    request_timeout: MAX_REQUEST_TIMEOUT + 1,
+                    ..SwarmConfig::default()
+                },
+                "request_timeout must be between"
+            ),
+        ];
+
+        for (config, expected_error) in test_cases {
+            let result = Swarm::builder()
+                .with_api_key("sk-test123456789".to_string())
+                .with_config(config)
+                .build();
+
+            assert!(result.is_err());
+            match result {
+                Err(SwarmError::ValidationError(msg)) => {
+                    assert!(
+                        msg.contains(expected_error),
+                        "Expected error message containing '{}', got '{}'",
+                        expected_error,
+                        msg
+                    );
+                }
+                _ => panic!("Expected ValidationError for invalid configuration"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_invalid_api_url() {
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_api_url("http://invalid-url".to_string()) // Non-HTTPS URL
+            .build();
+
+        assert!(result.is_err());
+        match result {
+            Err(SwarmError::ValidationError(msg)) => {
+                assert!(msg.contains("API URL must start with https://"));
+            }
+            _ => panic!("Expected ValidationError for invalid API URL"),
+        }
+    }
+
+    #[test]
+    fn test_valid_configurations() {
+        // Test valid configuration ranges
+        let valid_config = SwarmConfig {
+            request_timeout: 30,
+            connect_timeout: 10,
+            max_retries: 3,
+            valid_model_prefixes: vec!["gpt-".to_string()],
+            api_url: "https://api.openai.com/v1".to_string(),
+            ..SwarmConfig::default()
+        };
+
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_config(valid_config)
+            .build();
+
+        assert!(result.is_ok());
     }
 }
