@@ -42,9 +42,9 @@
 <!-- - **Text Instructions**  
   Test Instructions::Text variant with valid and empty strings. -->
 
-- **Function Instructions**  
+<!-- - **Function Instructions**  
   Test Instructions::Function variant with valid functions.  
-  Verify that functions are callable and return expected results.
+  Verify that functions are callable and return expected results. -->
 
 ## 3. Swarm::run() Method Tests
 

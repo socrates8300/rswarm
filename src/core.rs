@@ -1546,4 +1546,137 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_basic_function_instructions() {
+        let instruction_fn = Arc::new(|_: ContextVariables| -> String {
+            "Basic function instructions".to_string()
+        });
+
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "gpt-4".to_string(),
+            instructions: Instructions::Function(instruction_fn),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        let context = ContextVariables::new();
+        match &agent.instructions {
+            Instructions::Function(f) => assert_eq!(f(context), "Basic function instructions"),
+            _ => panic!("Expected Function instructions"),
+        }
+    }
+
+    #[test]
+    fn test_function_instructions_with_context() {
+        let instruction_fn = Arc::new(|vars: ContextVariables| -> String {
+            match vars.get("test_key") {
+                Some(value) => format!("Context value: {}", value),
+                None => "No context value found".to_string(),
+            }
+        });
+
+        let agent = Agent {
+            name: "context_agent".to_string(),
+            model: "gpt-4".to_string(),
+            instructions: Instructions::Function(instruction_fn),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        let mut context = ContextVariables::new();
+        context.insert("test_key".to_string(), "test_value".to_string());
+
+        match &agent.instructions {
+            Instructions::Function(f) => assert_eq!(f(context), "Context value: test_value"),
+            _ => panic!("Expected Function instructions"),
+        }
+    }
+
+    #[test]
+    fn test_function_instructions_in_swarm() {
+        let instruction_fn = Arc::new(|_: ContextVariables| -> String {
+            "Swarm function instructions".to_string()
+        });
+
+        let agent = Agent {
+            name: "swarm_agent".to_string(),
+            model: "gpt-4".to_string(),
+            instructions: Instructions::Function(instruction_fn),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        let swarm = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build()
+            .expect("Failed to build Swarm");
+
+        let context = ContextVariables::new();
+        let stored_agent = swarm.agent_registry.get("swarm_agent").unwrap();
+
+        match &stored_agent.instructions {
+            Instructions::Function(f) => assert_eq!(f(context), "Swarm function instructions"),
+            _ => panic!("Expected Function instructions"),
+        }
+    }
+
+    #[test]
+    fn test_complex_function_instructions() {
+        let instruction_fn = Arc::new(|vars: ContextVariables| -> String {
+            let mut parts = Vec::new();
+
+            if let Some(name) = vars.get("name") {
+                parts.push(format!("Name: {}", name));
+            }
+
+            if let Some(role) = vars.get("role") {
+                parts.push(format!("Role: {}", role));
+            }
+
+            if parts.is_empty() {
+                "Default instructions".to_string()
+            } else {
+                parts.join("\n")
+            }
+        });
+
+        let agent = Agent {
+            name: "complex_agent".to_string(),
+            model: "gpt-4".to_string(),
+            instructions: Instructions::Function(instruction_fn),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        // Test with empty context
+        let empty_context = ContextVariables::new();
+        match &agent.instructions {
+            Instructions::Function(f) => assert_eq!(f(empty_context), "Default instructions"),
+            _ => panic!("Expected Function instructions"),
+        }
+
+        // Test with partial context
+        let mut partial_context = ContextVariables::new();
+        partial_context.insert("name".to_string(), "Test Name".to_string());
+        match &agent.instructions {
+            Instructions::Function(f) => assert_eq!(f(partial_context), "Name: Test Name"),
+            _ => panic!("Expected Function instructions"),
+        }
+
+        // Test with full context
+        let mut full_context = ContextVariables::new();
+        full_context.insert("name".to_string(), "Test Name".to_string());
+        full_context.insert("role".to_string(), "Test Role".to_string());
+        match &agent.instructions {
+            Instructions::Function(f) => assert_eq!(f(full_context), "Name: Test Name\nRole: Test Role"),
+            _ => panic!("Expected Function instructions"),
+        }
+    }
 }
