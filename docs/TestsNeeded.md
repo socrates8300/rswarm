@@ -3,7 +3,7 @@
 ## 1. Swarm Struct Tests
 
 ### 1.1 Initialization Tests
-- **Valid Initialization**  
+<!-- - **Valid Initialization**  
   Test creating a Swarm instance with valid parameters.  
   Verify that all fields are correctly set.
 
@@ -13,7 +13,7 @@
 
 - **Invalid Configuration**  
   Test initializing Swarm with invalid configurations (e.g., negative timeouts).  
-  Expect appropriate error handling.
+  Expect appropriate error handling. -->
 
 ### 1.2 Builder Pattern Tests
 - **Builder Method Combinations**  
