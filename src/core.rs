@@ -172,6 +172,11 @@ impl SwarmBuilder {
         // First validate the configuration
         self.config.validate()?;
 
+        // Validate all agents
+        for agent in self.agents.values() {
+            agent.validate(&self.config)?;
+        }
+
         // Get API key from builder or environment
         let api_key = match self.api_key.or_else(|| env::var("OPENAI_API_KEY").ok()) {
             Some(key) => key,
@@ -824,6 +829,38 @@ impl SwarmConfig {
     }
 }
 
+impl Agent {
+    pub fn validate(&self, config: &SwarmConfig) -> SwarmResult<()> {
+        // Validate name
+        if self.name.trim().is_empty() {
+            return Err(SwarmError::ValidationError("Agent name cannot be empty".to_string()));
+        }
+
+        // Validate model
+        if self.model.trim().is_empty() {
+            return Err(SwarmError::ValidationError("Agent model cannot be empty".to_string()));
+        }
+
+        // Validate model prefix
+        if !config.valid_model_prefixes.iter().any(|prefix| self.model.starts_with(prefix)) {
+            return Err(SwarmError::ValidationError(format!(
+                "Invalid model prefix. Model must start with one of: {:?}",
+                config.valid_model_prefixes
+            )));
+        }
+
+        // Validate instructions
+        match &self.instructions {
+            Instructions::Text(text) if text.trim().is_empty() => {
+                return Err(SwarmError::ValidationError("Agent instructions cannot be empty".to_string()));
+            }
+            Instructions::Function(_) => {} // Function instructions are validated at runtime
+            _ => {}
+        }
+
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1208,5 +1245,113 @@ mod tests {
         let registered_agent = swarm.agent_registry.get(&agent.name).unwrap();
         assert_eq!(registered_agent.name, "registry_test_agent");
         assert_eq!(registered_agent.model, "gpt-4");
+    }
+
+    #[test]
+    fn test_agent_empty_name() {
+        let agent = Agent {
+            name: "".to_string(),
+            model: "gpt-4".to_string(),
+            instructions: Instructions::Text("Test instructions".to_string()),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        // Try to register the agent in a Swarm
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build();
+
+        // Verify error
+        assert!(result.is_err());
+        match result {
+            Err(SwarmError::ValidationError(msg)) => {
+                assert!(msg.contains("Agent name cannot be empty"));
+            }
+            _ => panic!("Expected ValidationError for empty agent name"),
+        }
+    }
+
+    #[test]
+    fn test_agent_empty_model() {
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "".to_string(),
+            instructions: Instructions::Text("Test instructions".to_string()),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        // Try to register the agent in a Swarm
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build();
+
+        // Verify error
+        assert!(result.is_err());
+        match result {
+            Err(SwarmError::ValidationError(msg)) => {
+                assert!(msg.contains("Agent model cannot be empty"));
+            }
+            _ => panic!("Expected ValidationError for empty model"),
+        }
+    }
+
+    #[test]
+    fn test_agent_invalid_model_prefix() {
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "invalid-model".to_string(), // Doesn't start with valid prefix
+            instructions: Instructions::Text("Test instructions".to_string()),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        // Try to register the agent in a Swarm
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build();
+
+        // Verify error
+        assert!(result.is_err());
+        match result {
+            Err(SwarmError::ValidationError(msg)) => {
+                assert!(msg.contains("Invalid model prefix"));
+            }
+            _ => panic!("Expected ValidationError for invalid model prefix"),
+        }
+    }
+
+    #[test]
+    fn test_agent_missing_instructions() {
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "gpt-4".to_string(),
+            instructions: Instructions::Text("".to_string()), // Empty instructions
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        // Try to register the agent in a Swarm
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build();
+
+        // Verify error
+        assert!(result.is_err());
+        match result {
+            Err(SwarmError::ValidationError(msg)) => {
+                assert!(msg.contains("Agent instructions cannot be empty"));
+            }
+            _ => panic!("Expected ValidationError for empty instructions"),
+        }
     }
 }

@@ -26,9 +26,9 @@
 ## 2. Agent Struct Tests
 
 ### 2.1 Initialization Tests
-- **Valid Agent Creation**  
+<!-- - **Valid Agent Creation**  
   Test creating an Agent with all required fields.  
-  Verify fields like name, model, instructions.
+  Verify fields like name, model, instructions. -->
 
 - **Missing Required Fields**  
   Test creating an Agent without a name or model.  
