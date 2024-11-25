@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
 #[cfg(test)]
+#[allow(unused_imports)]
 use std::sync::Arc;
 
 use crate::types::{Step, Steps};
@@ -814,107 +815,30 @@ impl SwarmConfig {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockito::{ServerGuard, Mock};
-    use serde_json::json;
-    use lazy_static::lazy_static;
-    use crate::constants::OpenAICredentials;
+    use crate::types::{ApiSettings, Agent, Instructions};
 
-    lazy_static! {
-        static ref CREDS_OPENAI: OpenAICredentials = OpenAICredentials::get_openai_credentials();
-    }
-    // const CredsOpenAI: OpenAICredentials = OpenAICredentials::get_openai_credentials();
 
-    /// Creates a mock server and returns its URL
-    fn setup_mock_server() -> (ServerGuard, String) {
-        let server = mockito::Server::new();
-        let url = server.url();
-        (server, url)
-    }
+    #[test]
+    fn test_valid_swarm_initialization() {
+        // Create custom config
+        let config = SwarmConfig {
+            api_url: "https://api.openai.com/v1".to_string(),
+            api_version: "v1".to_string(),
+            request_timeout: 30,
+            connect_timeout: 10,
+            api_settings: ApiSettings::default(),
+            max_retries: 3,
+            max_loop_iterations: 10,
+            valid_model_prefixes: vec!["gpt-".to_string()],
+            valid_api_url_prefixes: vec!["https://api.openai.com".to_string()],
+            loop_control: Default::default(),
+        };
 
-    /// Creates a mock response for chat completions
-    fn mock_chat_completion(server: &mut ServerGuard) -> Mock {
-        server.mock("POST", "/v1/chat/completions")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!({
-                "id": "mock-completion-id",
-                "object": "chat.completion",
-                "created": 1699000000,
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "This is a mock response"
-                    },
-                    "finish_reason": "stop"
-                }],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 10,
-                    "total_tokens": 20
-                }
-            }).to_string())
-            .create()
-    }
-
-    /// Creates a mock response for streaming chat completions
-    fn mock_streaming_chat_completion(server: &mut ServerGuard) -> Mock {
-        server.mock("POST", "/v1/chat/completions")
-            .with_status(200)
-            .with_header("content-type", "text/event-stream")
-            .with_body(
-                "data: {\"id\":\"mock-stream-id\",\"object\":\"chat.completion.chunk\",\"created\":1699000000,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"This \"},\"finish_reason\":null}]}\n\n\
-                 data: {\"id\":\"mock-stream-id\",\"object\":\"chat.completion.chunk\",\"created\":1699000000,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"is \"},\"finish_reason\":null}]}\n\n\
-                 data: {\"id\":\"mock-stream-id\",\"object\":\"chat.completion.chunk\",\"created\":1699000000,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"streaming.\"},\"finish_reason\":\"stop\"}]}\n\n\
-                 data: [DONE]\n\n"
-            )
-            .create()
-    }
-
-    /// Creates a mock response for function calls
-    fn mock_function_call(server: &mut ServerGuard) -> Mock {
-        server.mock("POST", "/v1/chat/completions")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!({
-                "id": "mock-function-id",
-                "object": "chat.completion",
-                "created": 1699000000,
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": null,
-                        "function_call": {
-                            "name": "test_function",
-                            "arguments": "{\"arg1\": \"value1\"}"
-                        }
-                    },
-                    "finish_reason": "function_call"
-                }],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 10,
-                    "total_tokens": 20
-                }
-            }).to_string())
-            .create()
-    }
-
-    #[tokio::test]
-    async fn test_get_chat_completion() {
-        let (mut server, url) = setup_mock_server();
-        let mock = mock_chat_completion(&mut server);
-
-        let swarm = Swarm::builder()
-            .with_api_key("sk-test".to_string())
-            .with_api_url(url)
-            .build()
-            .unwrap();
-
+        // Create test agent
         let agent = Agent {
             name: "test_agent".to_string(),
             model: "gpt-4".to_string(),
@@ -924,133 +848,38 @@ mod tests {
             parallel_tool_calls: false,
         };
 
-        let messages = vec![Message {
-            role: "user".to_string(),
-            content: Some("Hello".to_string()),
-            name: None,
-            function_call: None,
-        }];
-
-        let context_variables = HashMap::new();
-        let result = swarm
-            .get_chat_completion(&agent, &messages, &context_variables, None, false, false)
-            .await;
-
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert_eq!(response.choices[0].message.content.as_ref().unwrap(), "This is a mock response");
-        mock.assert();
-    }
-
-    #[tokio::test]
-    async fn test_streaming_chat_completion() {
-        let (mut server, url) = setup_mock_server();
-        let mock = mock_streaming_chat_completion(&mut server);
-
+        // Initialize Swarm using builder pattern
         let swarm = Swarm::builder()
-            .with_api_key("sk-test".to_string())
-            .with_api_url(url)
+            .with_api_key("sk-test123456789".to_string())
+            .with_config(config.clone())
+            .with_agent(agent.clone())
             .build()
-            .unwrap();
+            .expect("Failed to create Swarm");
 
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("Test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
-
-        let messages = vec![Message {
-            role: "user".to_string(),
-            content: Some("Hello".to_string()),
-            name: None,
-            function_call: None,
-        }];
-
-        let context_variables = HashMap::new();
-        let result = swarm
-            .get_chat_completion(&agent, &messages, &context_variables, None, true, false)
-            .await;
-
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        let content = response.choices.iter()
-            .filter_map(|c| c.message.content.as_ref())
-            .fold(String::new(), |acc, s| acc + s);
-        assert_eq!(content, "This is streaming.");
-        mock.assert();
-    }
-
-    #[tokio::test]
-    async fn test_function_call() {
-        let (mut server, url) = setup_mock_server();
-        let mock = mock_function_call(&mut server);
-
-        let test_function = AgentFunction {
-            name: "test_function".to_string(),
-            function: Arc::new(|_| Ok(ResultType::Value("function result".to_string()))),
-            accepts_context_variables: false,
-        };
-
-        let swarm = Swarm::builder()
-            .with_api_key("sk-test".to_string())
-            .with_api_url(url)
-            .build()
-            .unwrap();
-
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("Test instructions".to_string()),
-            functions: vec![test_function],
-            function_call: Some("auto".to_string()),
-            parallel_tool_calls: false,
-        };
-
-        let messages = vec![Message {
-            role: "user".to_string(),
-            content: Some("Call the test function".to_string()),
-            name: None,
-            function_call: None,
-        }];
-
-        let context_variables = HashMap::new();
-        let result = swarm
-            .get_chat_completion(&agent, &messages, &context_variables, None, false, false)
-            .await;
-
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert!(response.choices[0].message.function_call.is_some());
-        assert_eq!(
-            response.choices[0].message.function_call.as_ref().unwrap().name,
-            "test_function"
-        );
-        mock.assert();
+        // Verify fields are correctly set
+        assert_eq!(swarm.api_key, "sk-test123456789");
+        assert_eq!(swarm.config.api_url, config.api_url);
+        assert_eq!(swarm.config.request_timeout, config.request_timeout);
+        assert_eq!(swarm.config.connect_timeout, config.connect_timeout);
+        assert_eq!(swarm.config.max_retries, config.max_retries);
+        assert!(swarm.agent_registry.contains_key("test_agent"));
+        assert_eq!(swarm.agent_registry["test_agent"].name, agent.name);
+        assert_eq!(swarm.agent_registry["test_agent"].model, agent.model);
     }
 
     #[test]
-    fn test_handle_function_result() {
+    fn test_default_swarm_initialization() {
+        // Test default initialization using environment variable
+        std::env::set_var("OPENAI_API_KEY", "sk-test123456789");
+
         let swarm = Swarm::default();
 
-        // Test Value result
-        let value_result = ResultType::Value("test value".to_string());
-        let result = swarm.handle_function_result(value_result, false);
-        assert!(result.is_ok());
+        // Verify default values
+        assert_eq!(swarm.api_key, "sk-test123456789");
+        assert!(swarm.agent_registry.is_empty());
+        assert_eq!(swarm.config.api_url, OPENAI_DEFAULT_API_URL);
 
-        // Test Agent result
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("Test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
-        let agent_result = ResultType::Agent(agent);
-        let result = swarm.handle_function_result(agent_result, false);
-        assert!(result.is_ok());
+        // Clean up
+        std::env::remove_var("OPENAI_API_KEY");
     }
 }

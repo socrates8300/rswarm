@@ -24,7 +24,7 @@ We would like to express our gratitude to the OpenAI team for their innovative w
 
 By building upon Swarm, rswarm aims to bring these powerful concepts into the Rust ecosystem, enhancing them to suit our specific needs and preferences. We hope to continue pushing the boundaries of what's possible with Rust and AI, inspired by the groundwork laid by OpenAI.
 
-Feel free to explore the Swarm framework further, contribute to its development, or reach out with questions. Together, we can continue to innovate and expand the capabilities of AI agent interactions.
+Feel free to explore the rswarm framework further, contribute to its development, or reach out with questions. Together, we can continue to innovate and expand the capabilities of AI agent interactions.
 
 Happy coding!
 
