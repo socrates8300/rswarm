@@ -16,12 +16,12 @@
   Expect appropriate error handling. -->
 
 ### 1.2 Builder Pattern Tests
-- **Builder Method Combinations**  
+<!-- - **Builder Method Combinations**  
   Test all combinations of builder methods (e.g., with_api_key, with_api_url).  
   Verify that the final Swarm instance reflects the configurations.
 
 - **Default Values**  
-  Test that default values are set correctly when not specified.
+  Test that default values are set correctly when not specified. -->
 
 ## 2. Agent Struct Tests
 
