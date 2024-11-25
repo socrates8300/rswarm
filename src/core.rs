@@ -1354,4 +1354,93 @@ mod tests {
             _ => panic!("Expected ValidationError for empty instructions"),
         }
     }
+
+    #[test]
+    fn test_agent_with_invalid_model_prefix() {
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "invalid-model".to_string(),
+            instructions: Instructions::Text("Test instructions".to_string()),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build();
+
+        assert!(matches!(result, Err(SwarmError::ValidationError(_))));
+        if let Err(SwarmError::ValidationError(msg)) = result {
+            assert!(msg.contains("Invalid model prefix"));
+        }
+    }
+
+    #[test]
+    fn test_agent_with_empty_model() {
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "".to_string(),
+            instructions: Instructions::Text("Test instructions".to_string()),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build();
+
+        assert!(matches!(result, Err(SwarmError::ValidationError(_))));
+        if let Err(SwarmError::ValidationError(msg)) = result {
+            assert!(msg.contains("Agent model cannot be empty"));
+        }
+    }
+
+    #[test]
+    fn test_agent_with_valid_model_prefix() {
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "gpt-4".to_string(), // Valid prefix
+            instructions: Instructions::Text("Test instructions".to_string()),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_agent(agent)
+            .build();
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_custom_model_prefix_validation() {
+        // Create a custom config with specific model prefixes
+        let config = SwarmConfig {
+            valid_model_prefixes: vec!["custom-".to_string()],
+            ..SwarmConfig::default()
+        };
+
+        let agent = Agent {
+            name: "test_agent".to_string(),
+            model: "custom-model".to_string(),
+            instructions: Instructions::Text("Test instructions".to_string()),
+            functions: vec![],
+            function_call: None,
+            parallel_tool_calls: false,
+        };
+
+        let result = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .with_config(config)
+            .with_agent(agent)
+            .build();
+
+        assert!(result.is_ok());
+    }
 }

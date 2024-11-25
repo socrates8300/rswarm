@@ -30,9 +30,9 @@
   Test creating an Agent with all required fields.  
   Verify fields like name, model, instructions. -->
 
-- **Missing Required Fields**  
+<!-- - **Missing Required Fields**  
   Test creating an Agent without a name or model.  
-  Expect a panic or error as per implementation.
+  Expect a panic or error as per implementation. -->
 
 - **Invalid Model Prefix**  
   Test initializing an Agent with an invalid model prefix.  
