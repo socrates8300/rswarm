@@ -38,11 +38,6 @@ In your `Cargo.toml` file, add:
 ```bash
 cargo add rswarm
 ```
-or  
-```toml
-[dependencies]
-rswarm = { git = "https://github.com/socrates8300/rswarm.git" }
-```
 
 After updating `Cargo.toml`, fetch the dependencies by running:
 

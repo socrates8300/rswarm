@@ -167,11 +167,9 @@ pub fn validate_api_url(url: &str, config: &SwarmConfig) -> SwarmResult<()> {
     let parsed_url = Url::parse(url)
         .map_err(|e| SwarmError::ValidationError(format!("Invalid API URL format: {}", e)))?;
 
-    // Verify HTTPS
-    if parsed_url.scheme() != "https" {
-        return Err(SwarmError::ValidationError(
-            "API URL must use HTTPS protocol".to_string(),
-        ));
+    // Allow localhost URLs on any port
+    if parsed_url.host_str() == Some("localhost") {
+        return Ok(());
     }
 
     // Verify against allowed prefixes
