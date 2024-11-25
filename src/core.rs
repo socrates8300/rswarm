@@ -170,10 +170,10 @@ impl SwarmBuilder {
     /// - Configuration validation fails
     pub fn build(self) -> SwarmResult<Swarm> {
         // Get API key from builder or environment
-        let api_key = self.api_key.unwrap_or_else(|| {
-            env::var("OPENAI_API_KEY")
-                .unwrap_or_else(|_| panic!("OPENAI_API_KEY must be set either in environment or passed to builder"))
-        });
+        let api_key = match self.api_key.or_else(|| env::var("OPENAI_API_KEY").ok()) {
+            Some(key) => key,
+            None => return Err(SwarmError::ValidationError("API key must be set either in environment or passed to builder".to_string())),
+        };
 
         // Validate API key
         if api_key.trim().is_empty() {
@@ -881,5 +881,23 @@ mod tests {
 
         // Clean up
         std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn test_missing_api_key() {
+        // Remove API key from environment if present
+        std::env::remove_var("OPENAI_API_KEY");
+
+        // Attempt to create Swarm without API key
+        let result = Swarm::builder().build();
+
+        // Verify error
+        assert!(result.is_err());
+        match result {
+            Err(SwarmError::ValidationError(msg)) => {
+                assert!(msg.contains("API key must be set"));
+            }
+            _ => panic!("Expected ValidationError for missing API key"),
+        }
     }
 }
