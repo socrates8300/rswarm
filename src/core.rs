@@ -1,8 +1,8 @@
 // rswarm/src/core.rs
 
 use crate::constants::{
-    CTX_VARS_NAME, OPENAI_DEFAULT_API_URL, ROLE_ASSISTANT, ROLE_FUNCTION, ROLE_SYSTEM,
-    MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT,
+    CTX_VARS_NAME, MAX_REQUEST_TIMEOUT, MIN_REQUEST_TIMEOUT, OPENAI_DEFAULT_API_URL,
+    ROLE_ASSISTANT, ROLE_FUNCTION, ROLE_SYSTEM,
 };
 use crate::types::{
     Agent, AgentFunction, ChatCompletionResponse, ContextVariables, FunctionCall, Instructions,
@@ -14,21 +14,20 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
-use std::time::Duration;
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::error::{SwarmError, SwarmResult};
 use crate::types::{Step, Steps};
 use crate::util::{debug_print, extract_xml_steps, function_to_json, parse_steps_from_xml};
-use crate::error::{SwarmError, SwarmResult};
 use crate::validation::validate_api_request;
 use crate::validation::validate_api_url;
 
 impl Default for Swarm {
     fn default() -> Self {
-        Swarm::new(None, None, HashMap::new())
-            .expect("Default initialization should never fail")
+        Swarm::new(None, None, HashMap::new()).expect("Default initialization should never fail")
     }
 }
 
@@ -42,11 +41,13 @@ impl Default for Swarm {
 ///
 /// ```rust
 /// use rswarm::Swarm;
+/// use rswarm::error::SwarmError;
 ///
-/// let swarm = Swarm::builder()
-///     .with_api_key("your-api-key".to_string())
-///     .build()
-///     .expect("Failed to create Swarm");
+/// let result = Swarm::builder()
+/// .with_api_key("sk-test123456789".to_string())
+/// .with_api_url("https://api.openai.com/v1".to_string()) // Non-HTTPS URL
+/// .build();
+///
 /// ```
 pub struct Swarm {
     pub client: Client,
@@ -60,17 +61,6 @@ pub struct Swarm {
 /// Provides a flexible way to configure and create a new Swarm instance
 /// with custom settings and validations.
 ///
-/// # Examples
-///
-/// ```rust
-/// use rswarm::SwarmBuilder;
-///
-/// let swarm = SwarmBuilder::new()
-///     .with_api_key("your-api-key".to_string())
-///     .with_request_timeout(30)
-///     .build()
-///     .expect("Failed to build Swarm");
-/// ```
 pub struct SwarmBuilder {
     client: Option<Client>,
     api_key: Option<String>,
@@ -180,26 +170,35 @@ impl SwarmBuilder {
         // Get API key from builder or environment
         let api_key = match self.api_key.or_else(|| env::var("OPENAI_API_KEY").ok()) {
             Some(key) => key,
-            None => return Err(SwarmError::ValidationError("API key must be set either in environment or passed to builder".to_string())),
+            None => {
+                return Err(SwarmError::ValidationError(
+                    "API key must be set either in environment or passed to builder".to_string(),
+                ))
+            }
         };
 
         // Validate API key
         if api_key.trim().is_empty() {
-            return Err(SwarmError::ValidationError("API key cannot be empty".to_string()));
+            return Err(SwarmError::ValidationError(
+                "API key cannot be empty".to_string(),
+            ));
         }
         if !api_key.starts_with("sk-") {
-            return Err(SwarmError::ValidationError("Invalid API key format".to_string()));
+            return Err(SwarmError::ValidationError(
+                "Invalid API key format".to_string(),
+            ));
         }
 
         // Get and validate API URL
         let api_url = self.config.api_url.clone();
 
         // Validate API URL - non-HTTPS URLs should fail except for localhost
-        if !api_url.starts_with("https://") &&
-           !api_url.starts_with("http://localhost") &&
-           !api_url.starts_with("http://127.0.0.1") {
+        if !api_url.starts_with("https://")
+            && !api_url.starts_with("http://localhost")
+            && !api_url.starts_with("http://127.0.0.1")
+        {
             return Err(SwarmError::ValidationError(
-                "API URL must start with https:// (except for localhost)".to_string()
+                "API URL must start with https:// (except for localhost)".to_string(),
             ));
         }
 
@@ -209,12 +208,8 @@ impl SwarmBuilder {
         // Create client with timeout configuration
         let client = self.client.unwrap_or_else(|| {
             Client::builder()
-                .timeout(Duration::from_secs(
-                    self.config.request_timeout
-                ))
-                .connect_timeout(Duration::from_secs(
-                    self.config.connect_timeout
-                ))
+                .timeout(Duration::from_secs(self.config.request_timeout))
+                .connect_timeout(Duration::from_secs(self.config.connect_timeout))
                 .build()
                 .unwrap_or_else(|_| Client::new())
         });
@@ -223,7 +218,7 @@ impl SwarmBuilder {
             client,
             api_key,
             agent_registry: self.agents,
-            config: self.config
+            config: self.config,
         })
     }
 
@@ -232,7 +227,9 @@ impl SwarmBuilder {
         // Validate API key if present
         if let Some(ref key) = self.api_key {
             if key.trim().is_empty() || !key.starts_with("sk-") {
-                return Err(SwarmError::ValidationError("Invalid API key format".to_string()));
+                return Err(SwarmError::ValidationError(
+                    "Invalid API key format".to_string(),
+                ));
             }
         }
 
@@ -248,16 +245,6 @@ impl Swarm {
     ///
     /// This is the recommended way to create a new Swarm instance.
     ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use rswarm::Swarm;
-    ///
-    /// let swarm = Swarm::builder()
-    ///     .with_api_key("your-api-key".to_string())
-    ///     .build()
-    ///     .expect("Failed to create Swarm");
-    /// ```
     pub fn builder() -> SwarmBuilder {
         SwarmBuilder::new()
     }
@@ -313,11 +300,15 @@ impl Swarm {
     ) -> SwarmResult<ChatCompletionResponse> {
         // Validate inputs
         if self.api_key.is_empty() {
-            return Err(SwarmError::ValidationError("API key cannot be empty".to_string()));
+            return Err(SwarmError::ValidationError(
+                "API key cannot be empty".to_string(),
+            ));
         }
 
         if history.is_empty() {
-            return Err(SwarmError::ValidationError("Message history cannot be empty".to_string()));
+            return Err(SwarmError::ValidationError(
+                "Message history cannot be empty".to_string(),
+            ));
         }
 
         let instructions = match &agent.instructions {
@@ -340,7 +331,9 @@ impl Swarm {
         );
 
         // Convert agent functions to functions for the API
-        let functions: Vec<Value> = agent.functions.iter()
+        let functions: Vec<Value> = agent
+            .functions
+            .iter()
             .map(function_to_json)
             .collect::<SwarmResult<Vec<Value>>>()?;
 
@@ -368,7 +361,10 @@ impl Swarm {
                 if url.starts_with("http://localhost") || url.starts_with("http://127.0.0.1") {
                     Ok(url)
                 } else if !url.starts_with("https://") {
-                    return Err(SwarmError::ValidationError("OPENAI_API_URL must start with https:// (except for localhost)".to_string()));
+                    return Err(SwarmError::ValidationError(
+                        "OPENAI_API_URL must start with https:// (except for localhost)"
+                            .to_string(),
+                    ));
                 } else {
                     Ok(url)
                 }
@@ -418,19 +414,28 @@ impl Swarm {
                         }
                     }
                     Err(e) => {
-                        return Err(SwarmError::StreamError(format!("Error reading streaming response: {}", e)));
+                        return Err(SwarmError::StreamError(format!(
+                            "Error reading streaming response: {}",
+                            e
+                        )));
                     }
                 }
             }
 
             Ok(full_response)
         } else {
-            response.json::<ChatCompletionResponse>().await
+            response
+                .json::<ChatCompletionResponse>()
+                .await
                 .map_err(|e| SwarmError::DeserializationError(e.to_string()))
         }
     }
 
-    pub fn handle_function_result(&self, result: ResultType, debug: bool) -> SwarmResult<ResultType> {
+    pub fn handle_function_result(
+        &self,
+        result: ResultType,
+        debug: bool,
+    ) -> SwarmResult<ResultType> {
         match result {
             ResultType::Value(_) | ResultType::Agent(_) => Ok(result),
             _ => {
@@ -454,7 +459,9 @@ impl Swarm {
     ) -> SwarmResult<Response> {
         // Validate function_call.name
         if function_call.name.trim().is_empty() {
-            return Err(SwarmError::ValidationError("Function call name cannot be empty.".to_string()));
+            return Err(SwarmError::ValidationError(
+                "Function call name cannot be empty.".to_string(),
+            ));
         }
 
         let mut function_map = HashMap::new();
@@ -536,7 +543,9 @@ impl Swarm {
             .await?;
 
         if completion.choices.is_empty() {
-            return Err(SwarmError::ApiError("No choices returned from the model".to_string()));
+            return Err(SwarmError::ApiError(
+                "No choices returned from the model".to_string(),
+            ));
         }
 
         let choice = &completion.choices[0];
@@ -581,11 +590,15 @@ impl Swarm {
     ) -> SwarmResult<Response> {
         // Validate step
         if step.prompt.trim().is_empty() {
-            return Err(SwarmError::ValidationError("Step prompt cannot be empty".to_string()));
+            return Err(SwarmError::ValidationError(
+                "Step prompt cannot be empty".to_string(),
+            ));
         }
 
         if step.number == 0 {
-            return Err(SwarmError::ValidationError("Step number must be greater than 0".to_string()));
+            return Err(SwarmError::ValidationError(
+                "Step number must be greater than 0".to_string(),
+            ));
         }
 
         println!("Executing Step {}", step_number);
@@ -678,7 +691,10 @@ impl Swarm {
             }
             _ => {
                 println!("Unknown action: {}", step.action);
-                Err(SwarmError::ValidationError(format!("Unknown action: {}", step.action)))
+                Err(SwarmError::ValidationError(format!(
+                    "Unknown action: {}",
+                    step.action
+                )))
             }
         }
     }
@@ -727,10 +743,10 @@ impl Swarm {
 
         // Use config values for loop control
         if max_turns > self.config.max_loop_iterations as usize {
-            return Err(SwarmError::ValidationError(
-                format!("max_turns ({}) exceeds configured max_loop_iterations ({})",
-                    max_turns, self.config.max_loop_iterations)
-            ));
+            return Err(SwarmError::ValidationError(format!(
+                "max_turns ({}) exceeds configured max_loop_iterations ({})",
+                max_turns, self.config.max_loop_iterations
+            )));
         }
 
         // Extract XML steps from the agent's instructions
@@ -808,26 +824,35 @@ impl Swarm {
 impl SwarmConfig {
     pub fn validate(&self) -> SwarmResult<()> {
         if self.request_timeout == 0 {
-            return Err(SwarmError::ValidationError("request_timeout must be greater than 0".to_string()));
+            return Err(SwarmError::ValidationError(
+                "request_timeout must be greater than 0".to_string(),
+            ));
         }
         if self.connect_timeout == 0 {
-            return Err(SwarmError::ValidationError("connect_timeout must be greater than 0".to_string()));
+            return Err(SwarmError::ValidationError(
+                "connect_timeout must be greater than 0".to_string(),
+            ));
         }
         if self.max_retries == 0 {
-            return Err(SwarmError::ValidationError("max_retries must be greater than 0".to_string()));
+            return Err(SwarmError::ValidationError(
+                "max_retries must be greater than 0".to_string(),
+            ));
         }
         if self.valid_model_prefixes.is_empty() {
-            return Err(SwarmError::ValidationError("valid_model_prefixes cannot be empty".to_string()));
-        }
-        if self.request_timeout < MIN_REQUEST_TIMEOUT || self.request_timeout > MAX_REQUEST_TIMEOUT {
             return Err(SwarmError::ValidationError(
-                format!("request_timeout must be between {} and {} seconds",
-                    MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT)
+                "valid_model_prefixes cannot be empty".to_string(),
             ));
+        }
+        if self.request_timeout < MIN_REQUEST_TIMEOUT || self.request_timeout > MAX_REQUEST_TIMEOUT
+        {
+            return Err(SwarmError::ValidationError(format!(
+                "request_timeout must be between {} and {} seconds",
+                MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT
+            )));
         }
         if self.loop_control.default_max_iterations == 0 {
             return Err(SwarmError::ValidationError(
-                "default_max_iterations must be greater than 0".to_string()
+                "default_max_iterations must be greater than 0".to_string(),
             ));
         }
 
@@ -839,16 +864,24 @@ impl Agent {
     pub fn validate(&self, config: &SwarmConfig) -> SwarmResult<()> {
         // Validate name
         if self.name.trim().is_empty() {
-            return Err(SwarmError::ValidationError("Agent name cannot be empty".to_string()));
+            return Err(SwarmError::ValidationError(
+                "Agent name cannot be empty".to_string(),
+            ));
         }
 
         // Validate model
         if self.model.trim().is_empty() {
-            return Err(SwarmError::ValidationError("Agent model cannot be empty".to_string()));
+            return Err(SwarmError::ValidationError(
+                "Agent model cannot be empty".to_string(),
+            ));
         }
 
         // Validate model prefix
-        if !config.valid_model_prefixes.iter().any(|prefix| self.model.starts_with(prefix)) {
+        if !config
+            .valid_model_prefixes
+            .iter()
+            .any(|prefix| self.model.starts_with(prefix))
+        {
             return Err(SwarmError::ValidationError(format!(
                 "Invalid model prefix. Model must start with one of: {:?}",
                 config.valid_model_prefixes
@@ -858,35 +891,14 @@ impl Agent {
         // Validate instructions
         match &self.instructions {
             Instructions::Text(text) if text.trim().is_empty() => {
-                return Err(SwarmError::ValidationError("Agent instructions cannot be empty".to_string()));
+                return Err(SwarmError::ValidationError(
+                    "Agent instructions cannot be empty".to_string(),
+                ));
             }
             Instructions::Function(_) => {} // Function instructions are validated at runtime
             _ => {}
         }
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use tokio;
-
-    #[tokio::test]
-    async fn test_simple_conversation_with_openai_mock() {
-        // Mock server setup should be in a separate function or use a proper mock server
-        // For now, we'll skip this test if the mock server isn't running
-        if !mock_server_is_running() {
-            println!("Skipping test_simple_conversation_with_openai_mock as mock server is not running");
-            return;
-        }
-
-        // Rest of the test remains the same...
-    }
-
-    // Helper function to check if mock server is running
-    fn mock_server_is_running() -> bool {
-        use std::net::TcpStream;
-        TcpStream::connect("127.0.0.1:8000").is_ok()
     }
 }

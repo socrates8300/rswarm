@@ -1955,6 +1955,7 @@ dependencies = [
 name = "rswarm"
 version = "0.1.2"
 dependencies = [
+ "actix-web",
  "anyhow",
  "chrono",
  "dotenv",

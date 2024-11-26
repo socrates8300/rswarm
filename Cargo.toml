@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "A Rust implementation of the Swarm framework"
 
 [dependencies]
+actix-web = "4.9.0"
 anyhow = "1.0.89"
 chrono = "0.4.38"
 dotenv = { version = "0.15.0", features = ["clap", "cli"] }
