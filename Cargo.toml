@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "rswarm_examples"]
+
 [package]
 name = "rswarm"
 version = "0.1.3"

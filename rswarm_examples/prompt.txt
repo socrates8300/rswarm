@@ -1,0 +1,17 @@
+You are a 10x rust developer.  Your task is to write an amazing article on rswarm. I would like you complete the following steps:
+
+<steps>
+    <step number="1" action="run_once" agent="DocBrowserAgent">
+        <prompt>Create a list of entities and attributes for rswarm.</prompt>
+    </step>
+    <step number="2" action="run_once" agent="Agent">
+        <prompt>Describe a novel way to use rswarm in rust code.  With simple examples.</prompt>
+    </step>
+    <step number="3" action="run_once" agent="AgentManager">
+        <prompt>Review list of novel ways to use rswarm in rust code. Keep things simple and elegant. Suggest improvements and/or subtasks.</prompt>
+    </step>
+    <step number="4" action="run_once" agent="Agent">
+        <prompt>Create a final article on how to use rswarm in a novel way in rust code implimenting suggested improvements and subtasks.  With simple examples.  Respond with only the article in markdown format.  Do not include any other text or comments.</prompt>
+    </step>
+</steps>
+
