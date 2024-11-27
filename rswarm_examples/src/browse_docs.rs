@@ -4,6 +4,7 @@ use headless_chrome::Browser;
 use anyhow::Result;
 use rswarm::types::{ContextVariables, ResultType};
 use html_escape::decode_html_entities;
+use scraper::{Html, Selector};
 
 pub fn browse_rust_docs(args: ContextVariables) -> Result<ResultType> {
     // Extract the 'query' argument from ContextVariables
@@ -54,8 +55,8 @@ pub fn browse_rust_docs(args: ContextVariables) -> Result<ResultType> {
 
     // Iterate over each href and extract HTML content
     for href in hrefs {
-        // Construct the full URL
-        let full_url = format!("https://docs.rs/{}/latest/{}", query, href);
+        // Construct the full URL with the crate name for re-exports
+        let full_url = format!("https://docs.rs/{}/latest/{}/{}", query, query, href);
         println!("Navigating to re-export URL: {}", &full_url);
 
         // Navigate to the re-export URL
@@ -73,7 +74,7 @@ pub fn browse_rust_docs(args: ContextVariables) -> Result<ResultType> {
         ));
     }
 
-    println!("Extracted info:\n{}", &extracted_info);
+    println!("Extracted info:\n{}", extracted_info.clone());
 
     // Return the extracted information
     Ok(ResultType::Value(clean_up_extracted_info(extracted_info)))
@@ -83,8 +84,24 @@ fn clean_up_extracted_info(extracted_info: String) -> String {
     // Decode HTML entities
     let decoded = decode_html_entities(&extracted_info);
 
-    // Split into lines, trim each line, and filter out empty lines
-    decoded
+    // Parse the HTML content
+    let document = Html::parse_document(&decoded);
+
+    // Define a selector to target the main content.
+    // You might need to adjust this selector based on the actual HTML structure.
+    // For example, to select all paragraphs:
+    let selector = Selector::parse("main, p, h1, h2, h3, h4, h5, h6, li").unwrap();
+
+    // Extract and collect the text from the selected elements
+    let mut extracted_text = String::new();
+    for element in document.select(&selector) {
+        let text = element.text().collect::<Vec<_>>().join(" ");
+        extracted_text.push_str(&text);
+        extracted_text.push('\n'); // Add a newline for readability
+    }
+
+    // Optionally, further clean up the text by trimming and removing extra whitespace
+    extracted_text
         .lines()
         .map(|line| line.trim())
         .filter(|line| !line.is_empty())
