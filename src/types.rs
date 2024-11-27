@@ -488,3 +488,17 @@ pub struct TimeoutSettings {
     pub read_timeout: Duration,
     pub write_timeout: Duration,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAIErrorResponse {
+    pub error: OpenAIError,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAIError {
+    pub message: String,
+    #[serde(rename = "type")]
+    pub error_type: String,
+    pub param: Option<String>,
+    pub code: Option<String>,
+}

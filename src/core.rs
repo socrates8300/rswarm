@@ -6,7 +6,7 @@ use crate::constants::{
 };
 use crate::types::{
     Agent, AgentFunction, ChatCompletionResponse, ContextVariables, FunctionCall, Instructions,
-    Message, Response, ResultType, SwarmConfig,
+    Message, OpenAIErrorResponse, Response, ResultType, SwarmConfig,
 };
 
 use futures::StreamExt;
@@ -381,6 +381,25 @@ impl Swarm {
             .await
             .map_err(|e| SwarmError::NetworkError(e.to_string()))?;
 
+        if !response.status().is_success() {
+            // Read the response body
+            let error_text = response.text().await.map_err(|e| {
+                SwarmError::NetworkError(format!("Failed to read error response: {}", e))
+            })?;
+
+            // Optionally log the error message for debugging
+            debug_print(debug, &format!("API Error Response: {}", error_text));
+
+            // Attempt to deserialize into OpenAI's error format
+            let api_error: serde_json::Result<OpenAIErrorResponse> =
+                serde_json::from_str(&error_text);
+
+            return match api_error {
+                Ok(err_resp) => Err(SwarmError::ApiError(err_resp.error.message)),
+                Err(_) => Err(SwarmError::ApiError(error_text)),
+            };
+        }
+
         if stream {
             // Handle streaming response
             let mut stream = response.bytes_stream();
@@ -424,9 +443,16 @@ impl Swarm {
 
             Ok(full_response)
         } else {
-            response
-                .json::<ChatCompletionResponse>()
-                .await
+            // **Read the response body as text for better error handling**
+            let response_text = response.text().await.map_err(|e| {
+                SwarmError::DeserializationError(format!("Failed to read response text: {}", e))
+            })?;
+
+            // Optionally log the response body for debugging
+            debug_print(debug, &format!("API Response: {}", response_text));
+
+            // Deserialize the successful response
+            serde_json::from_str::<ChatCompletionResponse>(&response_text)
                 .map_err(|e| SwarmError::DeserializationError(e.to_string()))
         }
     }

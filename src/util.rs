@@ -27,12 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// ```
 pub fn debug_print(debug: bool, message: &str) {
     if debug {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| SwarmError::Other(format!("Failed to get system time: {}", e)))
-            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-            .as_secs();
-        println!("[{}] {}", timestamp, message);
+        println!("[DEBUG]: {}", message);
     }
 }
 
