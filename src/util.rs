@@ -1,16 +1,17 @@
 // ./src/util.rs
+use crate::error::{SwarmError, SwarmResult};
 /// Utility functions for the Swarm library
 ///
 /// This module provides various helper functions for debugging, message handling,
 /// XML processing, and function conversion utilities.
 use crate::types::{AgentFunction, FunctionCall, Message, Steps};
-use crate::error::{SwarmError, SwarmResult};
 use quick_xml::de::from_str as xml_from_str;
 use regex::Regex;
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Prints debug messages with timestamps when debug mode is enabled
+/// Prints debug messages when debug mode is enabled
+///
+/// Prefixes debug messages with "[DEBUG]" for easy identification in logs.
 ///
 /// # Arguments
 ///
@@ -22,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// ```rust
 /// use rswarm::debug_print;
 ///
-/// debug_print(true, "Processing request...");  // Prints: [1234567890] Processing request...
+/// debug_print(true, "Processing request...");  // Prints: [DEBUG]: Processing request...
 /// debug_print(false, "This won't print");     // Nothing printed
 /// ```
 pub fn debug_print(debug: bool, message: &str) {
@@ -34,7 +35,8 @@ pub fn debug_print(debug: bool, message: &str) {
 /// Merges a delta message chunk into an existing message
 ///
 /// Used for handling streaming responses where message content arrives in chunks.
-/// Updates both content and function calls in the existing message.
+/// Updates both content and function calls in the existing message. Particularly
+/// useful when processing streaming responses from the OpenAI API.
 ///
 /// # Arguments
 ///

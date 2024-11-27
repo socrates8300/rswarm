@@ -14,7 +14,6 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
-#[cfg(test)]
 #[allow(unused_imports)]
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,19 +34,19 @@ impl Default for Swarm {
 ///
 /// The Swarm struct provides the core functionality for managing AI agents,
 /// handling chat completions, and executing function calls. It maintains
-/// a registry of agents and handles API communication with OpenAI.
+/// a registry of agents and handles API communication with OpenAI or compatible APIs.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use rswarm::Swarm;
-/// use rswarm::error::SwarmError;
 ///
-/// let result = Swarm::builder()
-/// .with_api_key("sk-test123456789".to_string())
-/// .with_api_url("https://api.openai.com/v1".to_string()) // Non-HTTPS URL
-/// .build();
-///
+/// let swarm = Swarm::builder()
+///     .with_api_key("sk-test123456789".to_string())
+///     .with_api_url("https://api.openai.com/v1".to_string())
+///     .with_request_timeout(30)
+///     .build()
+///     .expect("Failed to create Swarm instance");
 /// ```
 pub struct Swarm {
     pub client: Client,
@@ -59,8 +58,24 @@ pub struct Swarm {
 /// Builder pattern implementation for creating Swarm instances
 ///
 /// Provides a flexible way to configure and create a new Swarm instance
-/// with custom settings and validations.
+/// with custom settings and validations. All configuration options have
+/// reasonable defaults but can be customized as needed.
 ///
+/// # Examples
+///
+/// ```rust
+/// use rswarm::Swarm;
+/// use std::time::Duration;
+///
+/// let swarm = Swarm::builder()
+///     .with_api_key("sk-test123456789".to_string())
+///     .with_api_url("https://api.openai.com/v1".to_string())
+///     .with_request_timeout(30)
+///     .with_connect_timeout(10)
+///     .with_max_retries(3)
+///     .build()
+///     .expect("Failed to create Swarm instance");
+/// ```
 pub struct SwarmBuilder {
     client: Option<Client>,
     api_key: Option<String>,
@@ -243,8 +258,21 @@ impl SwarmBuilder {
 impl Swarm {
     /// Creates a new SwarmBuilder instance
     ///
-    /// This is the recommended way to create a new Swarm instance.
+    /// This is the recommended way to create a new Swarm instance as it provides
+    /// a fluent interface for configuration and handles all necessary validation.
     ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rswarm::Swarm;
+    ///
+    /// let swarm = Swarm::builder()
+    ///     .with_api_key("sk-test123456789".to_string())
+    ///     .with_api_url("https://api.openai.com/v1".to_string())
+    ///     .with_request_timeout(30)
+    ///     .build()
+    ///     .expect("Failed to create Swarm instance");
+    /// ```
     pub fn builder() -> SwarmBuilder {
         SwarmBuilder::new()
     }
@@ -269,6 +297,9 @@ impl Swarm {
 
     /// Makes a chat completion request to the OpenAI API
     ///
+    /// Sends a request to the configured API endpoint with the provided agent configuration,
+    /// message history, and context variables. Supports both streaming and non-streaming responses.
+    ///
     /// # Arguments
     ///
     /// * `agent` - The Agent configuration to use for the request
@@ -289,6 +320,33 @@ impl Swarm {
     /// - Message history is empty
     /// - Network request fails
     /// - Response parsing fails
+    /// - API returns an error response
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use rswarm::{Swarm, Agent};
+    /// # use std::collections::HashMap;
+    /// let swarm = Swarm::builder()
+    ///     .with_api_key("sk-test123456789".to_string())
+    ///     .build()?;
+    ///
+    /// let agent = Agent::default();
+    /// let history = vec![];
+    /// let context = HashMap::new();
+    ///
+    /// let completion = swarm.get_chat_completion(
+    ///     &agent,
+    ///     &history,
+    ///     &context,
+    ///     None,
+    ///     false,
+    ///     false
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn get_chat_completion(
         &self,
         agent: &Agent,
@@ -734,6 +792,10 @@ impl Swarm {
 
     /// Executes a conversation with an AI agent
     ///
+    /// Manages a multi-turn conversation with an AI agent, handling message history,
+    /// function calls, and optional XML-defined execution steps. Supports both
+    /// single-execution and loop-based conversation flows.
+    ///
     /// # Arguments
     ///
     /// * `agent` - The Agent to use for the conversation
@@ -754,6 +816,34 @@ impl Swarm {
     /// - Input validation fails
     /// - Max turns exceeds configuration limits
     /// - API requests fail
+    /// - Step execution fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use rswarm::{Swarm, Agent};
+    /// # use std::collections::HashMap;
+    /// let swarm = Swarm::builder()
+    ///     .with_api_key("sk-test123456789".to_string())
+    ///     .build()?;
+    ///
+    /// let agent = Agent::default();
+    /// let messages = vec![];
+    /// let context = HashMap::new();
+    ///
+    /// let response = swarm.run(
+    ///     agent,
+    ///     messages,
+    ///     context,
+    ///     None,
+    ///     false,
+    ///     false,
+    ///     10
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn run(
         &self,
         mut agent: Agent,
