@@ -1,8 +1,8 @@
-You are a 10x rust developer.  Your task is to write an amazing article on rswarm. I would like you complete the following steps:
+You are a 10x rust developer.  Your task is to write an amazing article on creating OpenAI AI agents with rswarm. I would like you complete the following steps:
 
 <steps>
     <step number="1" action="run_once" agent="DocBrowserAgent">
-        <prompt>Create a list of entities and attributes for rswarm.</prompt>
+        <prompt>Before drafting the article for rswarm, browse the rust rswarm documentation, write a detailed description of rswarm and create a list of entities and attributes for rswarm.</prompt>
     </step>
     <step number="2" action="run_once" agent="Agent">
         <prompt>Describe a novel way to use rswarm in rust code.  With simple examples.</prompt>

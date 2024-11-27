@@ -3,6 +3,7 @@ use headless_chrome::Browser;
 // use headless_chrome::protocol::cdp::Page;
 use anyhow::Result;
 use rswarm::types::{ContextVariables, ResultType};
+use html_escape::decode_html_entities;
 
 pub fn browse_rust_docs(args: ContextVariables) -> Result<ResultType> {
     // Extract the 'query' argument from ContextVariables
@@ -16,57 +17,77 @@ pub fn browse_rust_docs(args: ContextVariables) -> Result<ResultType> {
 
     // Navigate directly to the crate's documentation page
     let docs_url = format!("https://docs.rs/{}/latest/{}", query, query);
+    println!("Navigating to URL: {}", &docs_url);
     tab.navigate_to(&docs_url)?;
     tab.wait_until_navigated()?;
 
-    // Update the extracted info to use the query as the crate name
+    // Initialize the extracted_info with the crate name
     let mut extracted_info = format!("Crate: {}\n", query);
 
-    // Navigate to the 'Structs' section if it exists
-    let structs_selector = "a#structs";
-    let structs_link = tab.wait_for_element(structs_selector);
+    // Define the selector for re-exports
+    let reexports_selector = "div.item-name[id^='reexport.'] a";
+    println!("Searching for re-exports using selector: {}", reexports_selector);
 
-    if let Ok(link) = structs_link {
-        // Click on the 'Structs' section
-        link.click()?;
-        tab.wait_until_navigated()?;
+    // Find all re-export elements
+    let reexport_elements = tab.find_elements(reexports_selector)?;
 
-        // Extract the list of structs
-        let struct_items_selector = "h2#structs + ul.item-table > li > div.item-name > a.struct";
-        let struct_items = tab.wait_for_elements(struct_items_selector)?;
+    // Debug: Print the number of re-export elements found
+    println!("Found {} re-export elements.", reexport_elements.len());
 
-        if !struct_items.is_empty() {
-            extracted_info.push_str("Structs:\n");
-            for item in struct_items {
-                let struct_name = item.get_inner_text()?;
-                extracted_info.push_str(&format!("- {}\n", struct_name));
+    // Collect all hrefs first to avoid navigating mid-iteration
+    let mut hrefs: Vec<String> = Vec::new();
+
+    for element in &reexport_elements {
+        if let Some(attributes) = element.get_attributes()? {
+            // Attributes are in [name1, value1, name2, value2, ...] format
+            for chunk in attributes.chunks(2) {
+                if chunk.len() == 2 && chunk[0] == "href" {
+                    let href = chunk[1].to_string();
+                    println!("Collected href: {}", href); // Debug log
+                    hrefs.push(href);
+                }
             }
         }
     }
 
-    // Similarly, extract Enums, Traits, Functions as needed
-    // For example, extracting functions:
-    let functions_selector = "a#functions";
-    let functions_link = tab.wait_for_element(functions_selector);
+    println!("Total hrefs collected: {}", hrefs.len());
 
-    if let Ok(link) = functions_link {
-        // Click on the 'Functions' section
-        link.click()?;
+    // Iterate over each href and extract HTML content
+    for href in hrefs {
+        // Construct the full URL
+        let full_url = format!("https://docs.rs/{}/latest/{}", query, href);
+        println!("Navigating to re-export URL: {}", &full_url);
+
+        // Navigate to the re-export URL
+        tab.navigate_to(&full_url)?;
         tab.wait_until_navigated()?;
 
-        // Extract the list of functions
-        let function_items_selector = "h2#functions + ul.item-table > li > div.item-name > a.fn";
-        let function_items = tab.wait_for_elements(function_items_selector)?;
+        // Retrieve the page's HTML content
+        let html_content = tab.get_content()?;
+        println!("Retrieved HTML content from: {}", &full_url);
 
-        if !function_items.is_empty() {
-            extracted_info.push_str("Functions:\n");
-            for item in function_items {
-                let function_name = item.get_inner_text()?;
-                extracted_info.push_str(&format!("- {}\n", function_name));
-            }
-        }
+        // Append the HTML content to extracted_info with separators for clarity
+        extracted_info.push_str(&format!(
+            "\n\n<!-- Start of {} -->\n{}\n<!-- End of {} -->\n",
+            href, html_content, href
+        ));
     }
+
+    println!("Extracted info:\n{}", &extracted_info);
 
     // Return the extracted information
-    Ok(ResultType::Value(extracted_info))
+    Ok(ResultType::Value(clean_up_extracted_info(extracted_info)))
+}
+
+fn clean_up_extracted_info(extracted_info: String) -> String {
+    // Decode HTML entities
+    let decoded = decode_html_entities(&extracted_info);
+
+    // Split into lines, trim each line, and filter out empty lines
+    decoded
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
