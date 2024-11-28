@@ -141,6 +141,7 @@ trait SwarmBuilderExt {
     fn with_agents(self, agents: &HashMap<String, Agent>) -> Self;
 }
 
+// Add this to the SwarmBuilder trait
 impl SwarmBuilderExt for rswarm::core::SwarmBuilder {
     fn with_agents(mut self, agents: &HashMap<String, Agent>) -> Self {
         for agent in agents.values() {
@@ -165,6 +166,7 @@ fn display_response(response: &rswarm::Response) {
 
 /// Waits for a shutdown signal (e.g., Ctrl+C) to gracefully terminate the application.
 async fn wait_for_shutdown() {
+    println!("Waiting for shutdown signal...<ctrl-c>");
     signal::ctrl_c()
         .await
         .expect("Failed to listen for shutdown signal");

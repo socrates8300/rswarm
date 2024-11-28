@@ -160,6 +160,13 @@ impl SwarmBuilder {
         self
     }
 
+    pub fn with_agents(mut self, agents: &HashMap<String, Agent>) -> Self {
+        for agent in agents.values() {
+            self = self.with_agent(agent.clone());
+        }
+        self
+    }
+
     /// Builds the Swarm instance with the configured settings
     ///
     /// # Returns
