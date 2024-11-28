@@ -12,7 +12,7 @@ use std::{
     fs,
     sync::Arc,
 };
-use tokio::signal;
+// use tokio::signal;
 use crate::browse_docs::browse_rust_docs;
 
 #[tokio::main]
@@ -141,7 +141,7 @@ trait SwarmBuilderExt {
     fn with_agents(self, agents: &HashMap<String, Agent>) -> Self;
 }
 
-// Add this to the SwarmBuilder trait
+// Refactor this is now part of the SwarmBuilder trait
 impl SwarmBuilderExt for rswarm::core::SwarmBuilder {
     fn with_agents(mut self, agents: &HashMap<String, Agent>) -> Self {
         for agent in agents.values() {
@@ -164,11 +164,10 @@ fn display_response(response: &rswarm::Response) {
     }
 }
 
-/// Waits for a shutdown signal (e.g., Ctrl+C) to gracefully terminate the application.
+/// Waits for a shutdown signal to gracefully terminate the application.
 async fn wait_for_shutdown() {
-    println!("Waiting for shutdown signal...<ctrl-c>");
-    signal::ctrl_c()
-        .await
-        .expect("Failed to listen for shutdown signal");
+    println!("Workflow completed. \nPress Enter to exit...");
+    let mut input = String::new();
+    let _ = std::io::stdin().read_line(&mut input);
     println!("Shutting down gracefully...");
 }
