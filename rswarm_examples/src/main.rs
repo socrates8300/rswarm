@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
 
     // Retrieve configuration from environment variables
     let api_key = get_env_var("OPENAI_API_KEY")?;
-    let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4".to_string());
+    let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
     let prompt = read_prompt_file("prompt.txt")?;
 
     // Define the browse_docs function for agents
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
             max_turns,
         )
         .await
-        .context("Swarm run failed")?;
+        .map_err(|e| anyhow::anyhow!("Swarm run failed: {}", e))?;
 
     // Display the response messages
     display_response(&response);
