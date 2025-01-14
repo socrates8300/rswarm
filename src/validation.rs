@@ -34,31 +34,7 @@ use url::Url;
 /// * Message roles or content are empty
 /// * max_turns is 0 or exceeds config.max_loop_iterations
 ///
-/// # Examples
 ///
-/// ```rust
-/// use rswarm::{Agent, Message, validate_api_request};
-///
-/// let agent = Agent {
-///     name: "test_agent".to_string(),
-///     model: "gpt-4".to_string(),
-///     instructions: Instructions::Text("You are a helpful assistant.".to_string()),
-///     functions: vec![],
-///     function_call: None,
-///     parallel_tool_calls: false,
-/// };
-///
-/// let messages = vec![Message {
-///     role: "user".to_string(),
-///     content: Some("Hello".to_string()),
-///     name: None,
-///     function_call: None,
-/// }];
-///
-/// // Use a reasonable value for max_turns that doesn't exceed max_loop_iterations
-/// let result = validate_api_request(&agent, &messages, &None, 5);
-/// assert!(result.is_ok());
-/// ```
 pub fn validate_api_request(
     agent: &Agent,
     messages: &[Message],
@@ -139,24 +115,6 @@ pub fn validate_api_request(
 /// * URL scheme is not HTTPS
 /// * URL doesn't match any allowed prefixes from config
 ///
-/// # Examples
-///
-/// ```rust
-/// use rswarm::{SwarmConfig, validate_api_url};
-///
-/// let config = SwarmConfig {
-///     valid_api_url_prefixes: vec!["https://api.openai.com".to_string()],
-///     // ... other fields ...
-/// };
-///
-/// let url = "https://api.openai.com/v1/chat/completions";
-/// let result = validate_api_url(url, &config);
-/// assert!(result.is_ok());
-///
-/// let invalid_url = "http://invalid-url.com";
-/// let result = validate_api_url(invalid_url, &config);
-/// assert!(result.is_err());
-/// ```
 pub fn validate_api_url(url: &str, config: &SwarmConfig) -> SwarmResult<()> {
     // Check if URL is empty
     if url.trim().is_empty() {

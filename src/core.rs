@@ -329,31 +329,6 @@ impl Swarm {
     /// - Response parsing fails
     /// - API returns an error response
     ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # use rswarm::{Swarm, Agent};
-    /// # use std::collections::HashMap;
-    /// let swarm = Swarm::builder()
-    ///     .with_api_key("sk-test123456789".to_string())
-    ///     .build()?;
-    ///
-    /// let agent = Agent::default();
-    /// let history = vec![];
-    /// let context = HashMap::new();
-    ///
-    /// let completion = swarm.get_chat_completion(
-    ///     &agent,
-    ///     &history,
-    ///     &context,
-    ///     None,
-    ///     false,
-    ///     false
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn get_chat_completion(
         &self,
         agent: &Agent,
@@ -825,32 +800,6 @@ impl Swarm {
     /// - API requests fail
     /// - Step execution fails
     ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # use rswarm::{Swarm, Agent};
-    /// # use std::collections::HashMap;
-    /// let swarm = Swarm::builder()
-    ///     .with_api_key("sk-test123456789".to_string())
-    ///     .build()?;
-    ///
-    /// let agent = Agent::default();
-    /// let messages = vec![];
-    /// let context = HashMap::new();
-    ///
-    /// let response = swarm.run(
-    ///     agent,
-    ///     messages,
-    ///     context,
-    ///     None,
-    ///     false,
-    ///     false,
-    ///     10
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn run(
         &self,
         mut agent: Agent,

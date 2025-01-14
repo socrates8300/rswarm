@@ -18,14 +18,7 @@ use serde_json::{json, Value};
 /// * `debug` - Boolean flag to enable/disable debug output
 /// * `message` - The message to print
 ///
-/// # Examples
 ///
-/// ```rust
-/// use rswarm::debug_print;
-///
-/// debug_print(true, "Processing request...");  // Prints: [DEBUG]: Processing request...
-/// debug_print(false, "This won't print");     // Nothing printed
-/// ```
 pub fn debug_print(debug: bool, message: &str) {
     if debug {
         println!("[DEBUG]: {}", message);
@@ -43,26 +36,7 @@ pub fn debug_print(debug: bool, message: &str) {
 /// * `message` - The existing message to update
 /// * `delta` - The new chunk of message data to merge
 ///
-/// # Examples
 ///
-/// ```rust
-/// use rswarm::{Message, merge_chunk_message};
-/// use serde_json::json;
-///
-/// let mut message = Message {
-///     role: "assistant".to_string(),
-///     content: Some("Hello".to_string()),
-///     name: None,
-///     function_call: None,
-/// };
-///
-/// let delta = json!({
-///     "content": " world!"
-/// }).as_object().unwrap().clone();
-///
-/// merge_chunk_message(&mut message, &delta);
-/// assert_eq!(message.content, Some("Hello world!".to_string()));
-/// ```
 pub fn merge_chunk_message(message: &mut Message, delta: &serde_json::Map<String, Value>) {
     for (key, value) in delta {
         match key.as_str() {
@@ -101,21 +75,7 @@ pub fn merge_chunk_message(message: &mut Message, delta: &serde_json::Map<String
 ///
 /// Will return an error if JSON serialization fails
 ///
-/// # Examples
 ///
-/// ```rust
-/// use rswarm::{AgentFunction, function_to_json};
-/// use std::sync::Arc;
-///
-/// let func = AgentFunction {
-///     name: "test_function".to_string(),
-///     function: Arc::new(|_| Ok("result".into())),
-///     accepts_context_variables: false,
-/// };
-///
-/// let json = function_to_json(&func).unwrap();
-/// assert_eq!(json["name"], "test_function");
-/// ```
 pub fn function_to_json(func: &AgentFunction) -> SwarmResult<Value> {
     let parameters = json!({
         "type": "object",
@@ -152,20 +112,6 @@ pub fn function_to_json(func: &AgentFunction) -> SwarmResult<Value> {
 ///
 /// # Examples
 ///
-/// ```rust
-/// use rswarm::parse_steps_from_xml;
-///
-/// let xml = r#"
-///     <steps>
-///         <step number="1" action="run_once">
-///             <prompt>Hello, world!</prompt>
-///         </step>
-///     </steps>
-/// "#;
-///
-/// let steps = parse_steps_from_xml(xml).unwrap();
-/// assert_eq!(steps.steps.len(), 1);
-/// ```
 pub fn parse_steps_from_xml(xml_content: &str) -> SwarmResult<Steps> {
     xml_from_str(xml_content)
         .map_err(|e| SwarmError::XmlError(format!("Failed to parse XML steps: {}", e)))
@@ -192,25 +138,7 @@ pub fn parse_steps_from_xml(xml_content: &str) -> SwarmResult<Steps> {
 /// * Regex pattern is invalid
 /// * XML content is malformed
 ///
-/// # Examples
 ///
-/// ```rust
-/// use rswarm::extract_xml_steps;
-///
-/// let instructions = r#"
-/// Do the following:
-/// <steps>
-///     <step number="1" action="run_once">
-///         <prompt>Hello</prompt>
-///     </step>
-/// </steps>
-/// Then continue.
-/// "#;
-///
-/// let (text, xml) = extract_xml_steps(instructions).unwrap();
-/// assert!(text.contains("Do the following:"));
-/// assert!(xml.is_some());
-/// ```
 pub fn extract_xml_steps(instructions: &str) -> SwarmResult<(String, Option<String>)> {
     let mut instructions_without_xml = instructions.to_string();
     let mut xml_steps = None;

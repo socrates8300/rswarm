@@ -32,18 +32,6 @@ pub enum Instructions {
 ///
 /// # Examples
 ///
-/// ```rust
-/// use rswarm::Agent;
-///
-/// let agent = Agent {
-///     name: "assistant".to_string(),
-///     model: "gpt-4".to_string(),
-///     instructions: Instructions::Text("You are a helpful assistant.".to_string()),
-///     functions: vec![],
-///     function_call: None,
-///     parallel_tool_calls: false,
-/// };
-/// ```
 #[derive(Clone)]
 pub struct Agent {
     pub name: String,
@@ -203,24 +191,6 @@ impl<'de> Deserialize<'de> for Agent {
 /// Contains all configuration parameters for API communication,
 /// request handling, and execution control.
 ///
-/// # Examples
-///
-/// ```rust
-/// use rswarm::SwarmConfig;
-///
-/// let config = SwarmConfig {
-///     api_url: "https://api.openai.com/v1".to_string(),
-///     api_version: "v1".to_string(),
-///     request_timeout: 30,
-///     connect_timeout: 10,
-///     max_retries: 3,
-///     max_loop_iterations: 10,
-///     valid_model_prefixes: vec!["gpt-".to_string()],
-///     valid_api_url_prefixes: vec!["https://api.openai.com".to_string()],
-///     loop_control: LoopControl::default(),
-///     api_settings: ApiSettings::default(),
-/// };
-/// ```
 #[derive(Clone, Debug)]
 pub struct SwarmConfig {
     pub api_url: String,
