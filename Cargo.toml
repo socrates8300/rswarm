@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "rswarm_examples"]
+members = [".", "./rswarm_examples/rust_doc_example", "./rswarm_examples/tco_agent"]
 
 [package]
 name = "rswarm"

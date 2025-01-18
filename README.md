@@ -65,6 +65,15 @@ In your Rust application, load the `.env` file:
 dotenv::dotenv().ok();
 ```
 
+
+```bash
+ ssh-add ~/.ssh/id_ed25519
+  
+  # Test GitHub connection
+  ssh -T git@github.com
+  
+  cargo update -p fmp_api
+```
 > **Note**: Keep your API key secure and avoid committing it to version control.
 
 ## Quick Start
