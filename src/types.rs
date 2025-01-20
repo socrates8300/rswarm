@@ -264,7 +264,7 @@ impl Default for SwarmConfig {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             max_retries: 3,
             max_loop_iterations: 10,
-            valid_model_prefixes: vec!["gpt-".to_string()],
+            valid_model_prefixes: vec!["gpt-".to_string(), "deepseek-".to_string(), "claude-".to_string(), "openai-".to_string(), "openrouter-".to_string()],
             valid_api_url_prefixes: VALID_API_URL_PREFIXES
                 .iter()
                 .map(|&s| s.to_string())

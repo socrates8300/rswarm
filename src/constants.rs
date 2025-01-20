@@ -5,7 +5,7 @@ pub const ROLE_FUNCTION: &str = "function";
 pub const ROLE_SYSTEM: &str = "system";
 pub const DEFAULT_REQUEST_TIMEOUT: u64 = 30; // 30 seconds timeout
 pub const DEFAULT_CONNECT_TIMEOUT: u64 = 10; // 10 seconds for connection timeout
-pub const VALID_API_URL_PREFIXES: [&str; 2] = [
+pub const VALID_API_URL_PREFIXES: [&str; 8] = [
     "https://api.openai.com",
     "https://api.azure.com/openai",
     "https://openrouter.ai/api/",

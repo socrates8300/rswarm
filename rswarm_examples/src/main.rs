@@ -123,7 +123,7 @@ fn initialize_agents(
         "DocBrowserAgent".to_string(),
         Agent {
             name: "DocBrowserAgent".to_string(),
-            model: "gpt-4".to_string(),
+            model: model.to_string(),
             instructions: Instructions::Text(
                 "You can browse Rust documentation using the 'browse_docs' function. The 'browse_docs' function takes a string as an argument (query) and returns a string.".to_string(),
             ),
