@@ -8,6 +8,12 @@ pub const DEFAULT_CONNECT_TIMEOUT: u64 = 10; // 10 seconds for connection timeou
 pub const VALID_API_URL_PREFIXES: [&str; 2] = [
     "https://api.openai.com",
     "https://api.azure.com/openai",
+    "https://openrouter.ai/api/",
+    "https://openrouter.ai/",
+    "https://openrouter.ai/api/v1/",
+    "https://api.deepseek.com",
+    "https://api.deepseek.com/chat/",
+    "https://api.deepseek.com/chat/completions",
 ];
 pub const DEFAULT_API_VERSION: &str = "v1";
 pub const DEFAULT_MAX_LOOP_ITERATIONS: u32 = 10;
