@@ -1,7 +1,10 @@
-// ./src/types.rs
+// File: rswarm/src/types.rs
 
+use crate::constants::{
+    DEFAULT_API_VERSION, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, OPENAI_DEFAULT_API_URL,
+    VALID_API_URL_PREFIXES,
+};
 use anyhow::Result;
-use crate::constants::{OPENAI_DEFAULT_API_URL, DEFAULT_API_VERSION, DEFAULT_REQUEST_TIMEOUT, DEFAULT_CONNECT_TIMEOUT, VALID_API_URL_PREFIXES};
 use serde::ser::SerializeStruct;
 use serde::{
     de::{self, MapAccess, Visitor},
@@ -28,10 +31,6 @@ pub enum Instructions {
 /// Represents an AI agent with its configuration and capabilities
 ///
 /// An agent is defined by its name, model, instructions, and available functions.
-/// It can be configured to make function calls and handle parallel tool calls.
-///
-/// # Examples
-///
 #[derive(Clone)]
 pub struct Agent {
     pub name: String,
@@ -187,10 +186,6 @@ impl<'de> Deserialize<'de> for Agent {
 }
 
 /// Configuration settings for the Swarm instance
-///
-/// Contains all configuration parameters for API communication,
-/// request handling, and execution control.
-///
 #[derive(Clone, Debug)]
 pub struct SwarmConfig {
     pub api_url: String,
@@ -206,9 +201,6 @@ pub struct SwarmConfig {
 }
 
 /// Controls the execution of loops in agent interactions
-///
-/// Defines parameters for controlling iteration limits, delays between
-/// iterations, and conditions for breaking loops.
 #[derive(Clone, Debug)]
 pub struct LoopControl {
     pub default_max_iterations: u32,
@@ -227,9 +219,6 @@ impl Default for LoopControl {
 }
 
 /// API-related settings for request handling
-///
-/// Contains configurations for retry behavior and timeout settings
-/// for various types of API operations.
 #[derive(Clone, Debug)]
 pub struct ApiSettings {
     pub retry_strategy: RetryStrategy,
@@ -264,7 +253,13 @@ impl Default for SwarmConfig {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             max_retries: 3,
             max_loop_iterations: 10,
-            valid_model_prefixes: vec!["gpt-".to_string(), "deepseek-".to_string(), "claude-".to_string(), "openai-".to_string(), "openrouter-".to_string()],
+            valid_model_prefixes: vec![
+                "gpt-".to_string(),
+                "deepseek-".to_string(),
+                "claude-".to_string(),
+                "openai-".to_string(),
+                "openrouter-".to_string(),
+            ],
             valid_api_url_prefixes: VALID_API_URL_PREFIXES
                 .iter()
                 .map(|&s| s.to_string())
@@ -276,9 +271,6 @@ impl Default for SwarmConfig {
 }
 
 /// Represents a function that can be called by an agent
-///
-/// Functions can accept context variables and return various types of results.
-/// They are used to extend agent capabilities with custom functionality.
 #[derive(Clone)]
 pub struct AgentFunction {
     pub name: String,
@@ -286,11 +278,9 @@ pub struct AgentFunction {
     pub accepts_context_variables: bool,
 }
 
-// Since we cannot serialize or debug function pointers, we need custom implementations or omit them
-
+// Custom Debug for AgentFunction (omitting the function pointer)
 impl fmt::Debug for AgentFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Omit the function field in Debug output
         write!(
             f,
             "AgentFunction {{ name: {}, accepts_context_variables: {} }}",
@@ -299,23 +289,6 @@ impl fmt::Debug for AgentFunction {
     }
 }
 
-/// Represents a message in a conversation
-///
-/// Messages can be from different roles (system, user, assistant, function)
-/// and may include function calls.
-///
-/// # Examples
-///
-/// ```rust
-/// use rswarm::Message;
-///
-/// let message = Message {
-///     role: "user".to_string(),
-///     content: Some("Hello, assistant!".to_string()),
-///     name: None,
-///     function_call: None,
-/// };
-/// ```
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
     pub role: String,
@@ -324,19 +297,12 @@ pub struct Message {
     pub function_call: Option<FunctionCall>,
 }
 
-/// Represents a function call made by an agent
-///
-/// Contains the name of the function to call and its arguments as a JSON string.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FunctionCall {
     pub name: String,
     pub arguments: String,
 }
 
-/// Response from a chat completion API call
-///
-/// Contains the complete response from the API, including
-/// message choices and usage statistics.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatCompletionResponse {
     pub id: String,
@@ -346,11 +312,62 @@ pub struct ChatCompletionResponse {
     pub usage: Option<Usage>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+/// In the original code the Choice struct was derived for Deserialize,
+/// but the API sometimes returns a "delta" field instead of "message."
+/// The custom deserializer below checks for "message" and if missing falls back to "delta."
+#[derive(Serialize, Clone, Debug)]
 pub struct Choice {
     pub index: u32,
     pub message: Message,
     pub finish_reason: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Choice {
+    fn deserialize<D>(deserializer: D) -> Result<Choice, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // First, deserialize the incoming value as a generic JSON Value.
+        let value = serde_json::Value::deserialize(deserializer)?;
+
+        let index = value
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| de::Error::missing_field("index"))? as u32;
+
+        let finish_reason = value
+            .get("finish_reason")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let message = if let Some(msg_val) = value.get("message") {
+            serde_json::from_value(msg_val.clone()).map_err(de::Error::custom)?
+        } else if let Some(delta_val) = value.get("delta") {
+            let role = delta_val
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let content = delta_val
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            Message {
+                role,
+                content,
+                name: None,
+                function_call: None,
+            }
+        } else {
+            return Err(de::Error::missing_field("message (or delta)"));
+        };
+
+        Ok(Choice {
+            index,
+            message,
+            finish_reason,
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -360,23 +377,14 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
-/// Represents the possible types of results from function calls
-///
-/// Results can be string values, agents, or context variables.
 #[derive(Clone, Debug)]
 pub enum ResultType {
-    /// A simple string value
     Value(String),
-    /// An agent configuration
     Agent(Agent),
-    /// A map of context variables
     ContextVariables(ContextVariables),
 }
 
 impl ResultType {
-    /// Extracts the string value from the ResultType
-    ///
-    /// Returns an empty string if the ResultType is not a Value variant.
     pub fn get_value(&self) -> String {
         match self {
             ResultType::Value(v) => v.clone(),
@@ -384,9 +392,6 @@ impl ResultType {
         }
     }
 
-    /// Extracts the Agent from the ResultType
-    ///
-    /// Returns None if the ResultType is not an Agent variant.
     pub fn get_agent(&self) -> Option<Agent> {
         if let ResultType::Agent(agent) = self {
             Some(agent.clone())
@@ -395,9 +400,6 @@ impl ResultType {
         }
     }
 
-    /// Extracts the ContextVariables from the ResultType
-    ///
-    /// Returns an empty HashMap if the ResultType is not a ContextVariables variant.
     pub fn get_context_variables(&self) -> ContextVariables {
         if let ResultType::ContextVariables(vars) = self {
             vars.clone()
@@ -407,11 +409,6 @@ impl ResultType {
     }
 }
 
-
-/// Response from an agent interaction
-///
-/// Contains the messages generated, the final agent state,
-/// and any context variables produced during the interaction.
 #[derive(Clone, Debug)]
 pub struct Response {
     pub messages: Vec<Message>,
@@ -436,10 +433,6 @@ pub struct Step {
     pub prompt: String,
 }
 
-/// Represents retry strategy configuration
-///
-/// Defines parameters for handling retries of failed requests,
-/// including delays and backoff factors.
 #[derive(Clone, Debug)]
 pub struct RetryStrategy {
     pub max_retries: u32,
@@ -448,9 +441,6 @@ pub struct RetryStrategy {
     pub backoff_factor: f32,
 }
 
-/// Timeout settings for various types of operations
-///
-/// Defines timeout durations for different aspects of API communication.
 #[derive(Clone, Debug)]
 pub struct TimeoutSettings {
     pub request_timeout: Duration,

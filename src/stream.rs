@@ -27,7 +27,6 @@ impl Streamer {
     ///
     /// The returned stream yields individual messages (using a JSON structure
     /// defined by ChatCompletionResponse) as soon as they are available.
-
     pub fn stream_chat(
         &self,
         agent: &Agent,
