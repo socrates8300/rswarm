@@ -9,7 +9,7 @@ use std::env;
 use crate::constants::{OPENAI_DEFAULT_API_URL, ROLE_SYSTEM};
 use crate::error::{SwarmError, SwarmResult};
 use crate::types::{Agent, ChatCompletionResponse, ContextVariables, Instructions, Message};
-use crate::util::{debug_print, function_to_json};
+use crate::util::function_to_json;
 
 /// Streamer provides a streaming–based API to receive agent responses incrementally.
 pub struct Streamer {
@@ -27,6 +27,7 @@ impl Streamer {
     ///
     /// The returned stream yields individual messages (using a JSON structure
     /// defined by ChatCompletionResponse) as soon as they are available.
+
     pub fn stream_chat(
         &self,
         agent: &Agent,
@@ -42,7 +43,7 @@ impl Streamer {
             Instructions::Text(_text) => agent.model.clone(),
             Instructions::Function(_func) => agent.model.clone(),
         });
-
+        println!("{:?}", debug);
         // Build the messages vector.
         let mut messages = Vec::new();
         let system_instructions = match &agent.instructions {

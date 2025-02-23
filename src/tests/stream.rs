@@ -2,6 +2,7 @@
 mod tests {
     use crate::stream::Streamer;
     use crate::types::{Agent, ContextVariables, Instructions, Message};
+    #[allow(unused)]
     use crate::SwarmError;
     use futures_util::{pin_mut, StreamExt};
     use reqwest::Client;
