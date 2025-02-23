@@ -11,7 +11,7 @@ rswarm is a Rust library crafted to streamline AI agent interactions, particular
 - **Managing AI agents with customizable behaviors**: Define agents with specific instructions and functions tailored to your application’s needs.
 - **Executing conversations with advanced control**: Run complex dialogues with agents, controlling parameters like context, functions, and looping behaviors.
 - **Integrating custom functions for extended capabilities**: Enhance agents with custom functions that can be called during conversations.
-- **Handling streaming responses and error scenarios gracefully**: Receive real-time responses and implement robust error handling mechanisms.
+- **Handling streaming responses and error scenarios gracefully**: Receive real-time, incremental responses using our streaming API and implement robust error handling.
 - **Defining prompts and execution steps using XML**: Utilize XML to structure prompts, handoffs, function calls, and execution steps for more complex interactions.
 
 Whether you’re building a chatbot, an AI assistant, or any application requiring intelligent dialogue, rswarm equips you with the tools to make it happen efficiently.
@@ -40,7 +40,6 @@ cargo add rswarm
 ```
 
 After updating `Cargo.toml`, fetch the dependencies by running:
-
 ```bash
 cargo build
 ```
@@ -53,14 +52,12 @@ rswarm relies on environment variables for configuration:
 - **OPENAI_API_URL (optional)**: Custom API URL if not using the default.
 
 Set them in your shell or a `.env` file:
-
 ```bash
 export OPENAI_API_KEY="your-api-key"
 export OPENAI_API_URL="https://api.openai.com/v1/chat/completions"  # Optional
 ```
 
 In your Rust application, load the `.env` file:
-
 ```rust
 dotenv::dotenv().ok();
 ```
@@ -69,7 +66,7 @@ dotenv::dotenv().ok();
 
 ## Quick Start
 
-Let’s dive into a basic example to see rswarm in action.
+Let’s dive into some examples to see rswarm in action.
 
 ### Creating a Swarm Instance
 
@@ -138,7 +135,7 @@ let dynamic_instructions = Instructions::Function(Arc::new(|context: ContextVari
 
 Let’s initiate a conversation with our agent.
 
-#### Initiating a Chat
+#### Initiating a Chat (Batch Mode)
 
 ```rust
 use rswarm::{Message, ContextVariables};
@@ -172,6 +169,48 @@ for msg in response.messages {
 ```
 
 The agent responds according to the instructions provided.
+
+### Streaming Responses
+
+For real-time applications, you can enable streaming to receive incremental responses.
+
+#### Streaming Example
+
+Instead of calling `run()`, create a `Streamer` from the Swarm’s client and API key:
+
+```rust
+use rswarm::stream::Streamer;
+use futures_util::StreamExt;
+use std::collections::HashMap;
+
+let streamer = Streamer::new(swarm.client.clone(), swarm.api_key.clone());
+
+let history = Vec::new();
+let context_variables = HashMap::new();
+let agent = agent.clone();  // The primary agent
+
+println!("Starting streaming conversation output:");
+let mut stream = streamer.stream_chat(&agent, &history, &context_variables, None, false);
+
+// Process each streamed message as soon as it arrives.
+while let Some(item) = stream.next().await {
+    match item {
+        Ok(message) => {
+            println!(
+                "{} {}: {}",
+                message.name.as_deref().unwrap_or("Unknown"),
+                message.role,
+                message.content.as_deref().unwrap_or("")
+            );
+            println!("--------------------------------");
+        }
+        Err(e) => eprintln!("Stream error: {}", e),
+    }
+}
+println!("Streaming conversation completed.");
+```
+
+In this example, the agent’s response is received incrementally via the Streamer.
 
 ## Deep Dive
 
@@ -240,10 +279,7 @@ let mut context_variables = ContextVariables::new();
 context_variables.insert("location".to_string(), "Berlin".to_string());
 
 let dynamic_instructions = Instructions::Function(Arc::new(|context: ContextVariables| {
-    format!(
-        "You are a helpful assistant. The user's location is {}.",
-        context.get("location").unwrap()
-    )
+    format!("You are a helpful assistant. The user's location is {}.", context.get("location").unwrap())
 }));
 
 agent.instructions = dynamic_instructions;
@@ -257,13 +293,12 @@ Agents can call functions during conversations to perform specific tasks.
 
 #### Implementing Function Handling
 
-First, define a function:
+Define a function, add it to the agent, and then proceed with a conversation:
 
 ```rust
 use rswarm::{AgentFunction, ContextVariables, ResultType};
 use std::sync::Arc;
 
-// Define the echo function
 let echo_function = AgentFunction {
     name: "echo".to_string(),
     function: Arc::new(|args: ContextVariables| {
@@ -273,17 +308,9 @@ let echo_function = AgentFunction {
     accepts_context_variables: true,
 };
 
-// Add the function to the agent
-let mut agent = Agent {
-    name: "assistant".to_string(),
-    model: "gpt-3.5-turbo".to_string(),
-    instructions: Instructions::Text("You are a helpful assistant.".to_string()),
-    functions: vec![echo_function],  // Add the function here
-    function_call: Some("auto".to_string()),  // Allow the agent to call functions
-    parallel_tool_calls: false,
-};
+agent.functions.push(echo_function);
+agent.function_call = Some("auto".to_string());
 
-// Now use the agent in conversation
 let messages = vec![Message {
     role: "user".to_string(),
     content: Some("Repeat after me: Hello World!".to_string()),
@@ -309,97 +336,24 @@ for msg in response.messages {
 }
 ```
 
-In this example, we define an echo function that the agent can use to repeat messages. The agent will automatically decide when to use this function based on the conversation context.
+### XML-Defined Prompts and Execution Steps
 
-### Streaming Responses
+rswarm also allows for XML definitions to structure multi-step interactions.
 
-For real-time applications, enable streaming to receive incremental responses.
-
-#### Enabling Streaming
-
-```rust
-let response = swarm
-    .run(
-        agent.clone(),
-        messages.clone(),
-        context_variables.clone(),
-        None,
-        true,   // Enable streaming
-        false,  // Debug mode off
-        5
-    )
-    .await
-    .expect("Failed to run the conversation");
-```
-
-### Error Handling and Retries
-
-Robust error handling ensures a smooth user experience.
-
-#### Configuring Retries
-
-```rust
-let custom_config = SwarmConfig {
-    max_retries: 5,
-    ..Default::default()
-};
-
-let swarm = Swarm::builder()
-    .with_config(custom_config)
-    .build()
-    .expect("Failed to create Swarm with custom configuration");
-```
-
-#### Implementing Retry Logic
-
-```rust
-use rswarm::SwarmError;
-
-match swarm.run(/* parameters */).await {
-    Ok(response) => {
-        // Process the response
-    }
-    Err(e) => {
-        if e.is_retriable() {
-            // Implement retry logic
-        } else {
-            eprintln!("An error occurred: {}", e);
-        }
-    }
-}
-```
-
-### Defining Prompts and Execution Steps with XML
-
-rswarm allows you to define complex interactions using XML, including prompts, handoffs, function calls, and execution steps. This feature enables you to structure conversations and control agent behavior in a more organized manner.
-
-#### Using XML to Define Steps
-
-You can embed XML within the agent’s instructions to define a sequence of steps for the agent to execute.
-
-##### Example of XML Steps
+#### Embedding XML Steps in Instructions
 
 ```xml
 <steps>
-    <step number="1" action="run_once">
-        <prompt>Introduce yourself.</prompt>
-    </step>
-    <step number="2" action="loop" agent="assistant">
-        <prompt>Answer the user's questions until they say 'goodbye'.</prompt>
-    </step>
+  <step number="1" action="run_once">
+    <prompt>Introduce yourself.</prompt>
+  </step>
+  <step number="2" action="loop" agent="assistant">
+    <prompt>Answer the user's questions until they say 'goodbye'.</prompt>
+  </step>
 </steps>
 ```
 
-#### How It Works
-
-- **Step Number**: Indicates the order of execution.
-- **Action**: Defines what the agent should do (run_once, loop).
-- **Agent (Optional)**: Specifies which agent to use for the step.
-- **Prompt**: The instruction or message for the agent.
-
-#### Parsing XML Steps
-
-The library provides functions to extract and parse these steps from the instructions.
+#### Parsing and Executing XML Steps
 
 ```rust
 use rswarm::{extract_xml_steps, parse_steps_from_xml, Steps};
@@ -407,218 +361,28 @@ use rswarm::{extract_xml_steps, parse_steps_from_xml, Steps};
 let instructions = r#"
 You are about to engage in a conversation.
 <steps>
-    <step number="1" action="run_once">
-        <prompt>Introduce yourself.</prompt>
-    </step>
-    <step number="2" action="loop" agent="assistant">
-        <prompt>Answer the user's questions until they say 'goodbye'.</prompt>
-    </step>
+  <step number="1" action="run_once">
+    <prompt>Introduce yourself.</prompt>
+  </step>
+  <step number="2" action="loop" agent="assistant">
+    <prompt>Answer the user's questions until they say 'goodbye'.</prompt>
+  </step>
 </steps>
 Proceed with the conversation.
 "#;
 
-// Extract XML steps
 let (instructions_without_xml, xml_steps) = extract_xml_steps(instructions).unwrap();
 
-// Parse the steps
 let steps = if let Some(xml_content) = xml_steps {
     parse_steps_from_xml(&xml_content).unwrap()
 } else {
     Steps { steps: Vec::new() }
 };
-
-// Now you can use `steps` in your conversation logic
 ```
-
-#### Executing Steps
 
 The Swarm’s `run()` method automatically handles the execution of steps defined in XML.
 
-```rust
-let response = swarm
-    .run(
-        agent.clone(),
-        messages,
-        context_variables,
-        None,
-        false,
-        false,
-        10
-    )
-    .await
-    .expect("Failed to run the conversation with steps");
-```
-
-#### Step Actions
-
-- **run_once**: Executes the step’s prompt once.
-- **loop**: Repeats the step’s prompt until a termination condition is met.
-
-#### Agent Handoffs
-
-By specifying an agent in a step, you can switch agents during the conversation.
-
-```xml
-<step number="2" action="loop" agent="specialist_agent">
-    <prompt>Provide detailed answers to the user's technical questions.</prompt>
-</step>
-```
-
-In the above example, the conversation hands off to `specialist_agent` for step 2.
-
-## Advanced Topics
-
-Delve deeper into rswarm’s capabilities.
-
-### Managing Multiple Agents
-
-Handle complex applications with multiple agents.
-
-#### Registering Agents
-
-```rust
-// Register the initial agent
-swarm.agent_registry.insert(agent.name.clone(), agent.clone());
-
-// Define another agent
-let assistant_agent = Agent {
-    name: "general_assistant".to_string(),
-    model: "gpt-4".to_string(),
-    instructions: Instructions::Text("You are a general-purpose assistant.".to_string()),
-    functions: vec![],
-    function_call: None,
-    parallel_tool_calls: false,
-};
-
-// Register the new agent
-swarm.agent_registry.insert(assistant_agent.name.clone(), assistant_agent.clone());
-```
-
-#### Switching Agents
-
-```rust
-let mut current_agent = swarm.get_agent_by_name("general_assistant")
-    .expect("Agent not found");
-
-if user_requests_specialized_info {
-    current_agent = swarm.get_agent_by_name("specialist_agent")
-        .expect("Agent not found");
-}
-```
-
-### Custom Instruction Functions
-
-Dynamic instructions adapt agent behavior in real-time.
-
-#### Example
-
-```rust
-let custom_instructions = Instructions::Function(Arc::new(|context: ContextVariables| {
-    let user_role = context.get("role").unwrap_or(&"user".to_string());
-    format!("You are assisting a {}.", user_role)
-}));
-
-agent.instructions = custom_instructions;
-```
-
-### Loop Control and Execution Steps
-
-Control complex conversation flows with loop control and execution steps.
-
-#### Implementing Loop Control
-
-When using the `loop` action in XML steps, rswarm handles loop execution and termination conditions.
-
-- **Termination Condition**: The loop ends when the `context_variables` contain a key that matches a break condition (e.g., `"end_loop": "true"`).
-- **Max Iterations**: Prevent infinite loops by setting `max_loop_iterations` in `SwarmConfig`.
-
-```rust
-let custom_config = SwarmConfig {
-    max_loop_iterations: 5,
-    ..Default::default()
-};
-
-let swarm = Swarm::builder()
-    .with_config(custom_config)
-    .build()
-    .expect("Failed to create Swarm with custom configuration");
-```
-
-Within your function, you can set `context_variables` to signal loop termination.
-
-```rust
-let end_loop_function = AgentFunction {
-    name: "end_loop".to_string(),
-    function: Arc::new(|mut args: ContextVariables| {
-        args.insert("end_loop".to_string(), "true".to_string());
-        Ok(ResultType::ContextVariables(args))
-    }),
-    accepts_context_variables: true,
-};
-
-// Add the function to the agent
-agent.functions.push(end_loop_function);
-```
-
-### Utilizing the Utility Functions
-
-rswarm provides utility functions to assist with debugging and processing.
-
-#### Debug Printing
-
-```rust
-use rswarm::debug_print;
-
-debug_print(true, "This is a debug message.");
-```
-
-#### Merging Chunked Messages
-
-When handling streaming responses, use `merge_chunk_message` to assemble messages.
-
-```rust
-use rswarm::{Message, merge_chunk_message};
-use serde_json::json;
-
-let mut message = Message {
-    role: "assistant".to_string(),
-    content: Some("Hello".to_string()),
-    name: None,
-    function_call: None,
-};
-
-let delta = json!({
-    "content": " world!"
-}).as_object().unwrap().clone();
-
-merge_chunk_message(&mut message, &delta);
-assert_eq!(message.content, Some("Hello world!".to_string()));
-```
-
-### Validation and Error Handling
-
-Ensure your application handles errors gracefully by utilizing the validation functions provided by rswarm.
-
-#### Validating API Requests
-
-```rust
-use rswarm::validation::validate_api_request;
-
-validate_api_request(&agent, &messages, &None, 5)
-    .expect("Validation failed");
-```
-
-#### Validating API URLs
-
-```rust
-use rswarm::validation::validate_api_url;
-
-let api_url = "https://api.openai.com/v1/chat/completions";
-validate_api_url(api_url, &swarm.config)
-    .expect("Invalid API URL");
-```
-
-## Best Practices
+### Advanced Topics and Best Practices
 
 - **Secure API Keys**: Use environment variables and avoid hardcoding sensitive information.
 - **Handle Errors Gracefully**: Implement retry logic and provide user-friendly error messages.
@@ -626,13 +390,11 @@ validate_api_url(api_url, &swarm.config)
 - **Keep Agents Modular**: Design agents with single responsibilities for easier maintenance.
 - **Leverage Context**: Use context variables to enhance agent responses dynamically.
 - **Use XML for Complex Flows**: Utilize XML definitions for structured and maintainable conversation flows.
-- **Test Thoroughly**: Write tests to ensure your agents and functions work as expected.
+- **Test Thoroughly**: Write tests (as provided in the examples) to ensure your agents and functions work as expected.
 
 ## Conclusion
 
-We’ve explored the landscape of rswarm, uncovering how it can elevate your Rust applications with intelligent AI interactions. From setting up a basic conversation to mastering advanced features like XML-defined execution steps, you’re now equipped to harness the full power of this library.
-
-As you continue your development journey, remember that innovation thrives on experimentation. Don’t hesitate to explore new ideas, contribute to the rswarm community, and push the boundaries of what’s possible with Rust and AI.
+We’ve explored the landscape of rswarm—how it simplifies AI agent interactions in Rust while providing advanced features like streaming responses, agent functions, and XML-based execution flows. Whether you’re just starting with AI in Rust or pushing the boundaries of complex interactions, rswarm provides a robust foundation to build upon.
 
 Happy coding!
 
@@ -649,11 +411,11 @@ pub struct Swarm {
 }
 ```
 
-- **Purpose**: Manages API communication and agent interactions.
-- **Key Methods**:
-  - `run()`: Executes a conversation.
-  - `builder()`: Initializes a `SwarmBuilder`.
-  - `get_agent_by_name()`: Retrieves an agent from the registry.
+**Purpose**: Manages API communication and agent interactions.
+**Key Methods**:
+- `run()`: Executes a conversation (batch mode or with XML-defined steps).
+- `builder()`: Initializes a `SwarmBuilder`.
+- `get_agent_by_name()`: Retrieves an agent from the registry.
 
 ### Agent Struct
 
@@ -668,14 +430,14 @@ pub struct Agent {
 }
 ```
 
-- **Purpose**: Defines an AI assistant’s behavior.
-- **Fields**:
-  - `name`: Unique identifier.
-  - `model`: AI model to use (e.g., "gpt-3.5-turbo").
-  - `instructions`: Guides the agent’s responses.
-  - `functions`: Custom functions the agent can call.
-  - `function_call`: Determines when functions are called.
-  - `parallel_tool_calls`: Enables parallel execution of functions.
+**Purpose**: Defines an AI assistant’s behavior.
+**Fields**:
+- `name`: Unique identifier.
+- `model`: AI model to be used (e.g., "gpt-3.5-turbo", "gpt-4").
+- `instructions`: Guides the agent’s responses (static or dynamic).
+- `functions`: Custom functions available to the agent.
+- `function_call`: Determines when functions are called.
+- `parallel_tool_calls`: Enables parallel execution of functions.
 
 ### AgentFunction Struct
 
@@ -687,11 +449,11 @@ pub struct AgentFunction {
 }
 ```
 
-- **Purpose**: Enables agents to execute custom logic.
-- **Fields**:
-  - `name`: Function identifier.
-  - `function`: The executable function.
-  - `accepts_context_variables`: Indicates if it uses context variables.
+**Purpose**: Enables agents to execute custom logic.
+**Fields**:
+- `name`: Identifier for the function.
+- `function`: The executable function logic.
+- `accepts_context_variables`: Indicates if context variables are used.
 
 ### SwarmConfig Struct
 
@@ -710,15 +472,7 @@ pub struct SwarmConfig {
 }
 ```
 
-- **Purpose**: Configures Swarm behavior.
-- **Fields**:
-  - `api_url`: The OpenAI API URL.
-  - `request_timeout`: Max time for each API request.
-  - `connect_timeout`: Max time to establish a connection.
-  - `max_retries`: Max retry attempts for failed requests.
-  - `max_loop_iterations`: Limits to prevent infinite loops.
-  - `loop_control`: Settings for loop execution.
-  - `api_settings`: Advanced API configurations.
+**Purpose**: Configures Swarm behavior, including API endpoints, timeouts, and retry logic.
 
 ### Instructions Enum
 
@@ -729,10 +483,7 @@ pub enum Instructions {
 }
 ```
 
-- **Purpose**: Defines agent instructions.
-- **Variants**:
-  - `Text`: Static instructions.
-  - `Function`: Dynamic instructions based on context.
+**Purpose**: Provides static or dynamic instructions for agents.
 
 ### ContextVariables Type
 
@@ -740,7 +491,7 @@ pub enum Instructions {
 pub type ContextVariables = HashMap<String, String>;
 ```
 
-- **Purpose**: Stores key-value pairs for context within conversations.
+**Purpose**: Stores key-value pairs for dynamic context within conversations.
 
 ### ResultType Enum
 
@@ -752,35 +503,21 @@ pub enum ResultType {
 }
 ```
 
-- **Purpose**: Represents the result of an agent function execution.
+**Purpose**: Represents the result of an agent function execution.
 
-### Steps Struct
+### Streaming with Streamer
+
+The new `Streamer` struct enables receiving real-time agent responses.
 
 ```rust
-pub struct Steps {
-    pub steps: Vec<Step>,
+pub struct Streamer {
+    client: Client,
+    api_key: String,
 }
 ```
 
-- **Purpose**: Represents a sequence of execution steps defined in XML.
-
-### Step Struct
-
-```rust
-pub struct Step {
-    pub number: usize,
-    pub action: String,
-    pub agent: Option<String>,
-    pub prompt: String,
-}
-```
-
-- **Purpose**: Defines a single execution step.
-- **Fields**:
-  - `number`: The sequence number of the step.
-  - `action`: The action to perform (run_once, loop).
-  - `agent`: Optional agent name for handoff.
-  - `prompt`: The prompt to execute.
+**Key Method**:
+- `stream_chat()`: Returns an asynchronous stream yielding incremental responses as `Message` items.
 
 ## License
 
