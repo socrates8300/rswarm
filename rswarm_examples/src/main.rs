@@ -4,14 +4,9 @@ mod browse_docs;
 
 use anyhow::{Context, Result};
 use dotenv::dotenv;
-use rswarm::{Agent, Instructions, Swarm};
 use rswarm::types::AgentFunction;
-use std::{
-    collections::HashMap,
-    env,
-    fs,
-    sync::Arc,
-};
+use rswarm::{Agent, Instructions, Swarm};
+use std::{collections::HashMap, env, fs, sync::Arc};
 // use tokio::signal;
 use crate::browse_docs::browse_rust_docs;
 
@@ -72,14 +67,12 @@ async fn main() -> Result<()> {
 
 /// Retrieves the value of the specified environment variable.
 fn get_env_var(key: &str) -> Result<String> {
-    env::var(key)
-        .with_context(|| format!("{} environment variable not set", key))
+    env::var(key).with_context(|| format!("{} environment variable not set", key))
 }
 
 /// Reads the prompt from the given file path.
 fn read_prompt_file(path: &str) -> Result<String> {
-    fs::read_to_string(path)
-        .with_context(|| format!("Failed to read prompt file '{}'", path))
+    fs::read_to_string(path).with_context(|| format!("Failed to read prompt file '{}'", path))
 }
 
 /// Initializes all agents required for the swarm.
@@ -137,7 +130,7 @@ fn initialize_agents(
 }
 
 /// Extends the Swarm builder with multiple agents.
-trait SwarmBuilderExt {
+pub trait SwarmBuilderExt {
     fn with_agents(self, agents: &HashMap<String, Agent>) -> Self;
 }
 

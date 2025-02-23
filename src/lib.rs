@@ -12,3 +12,5 @@ pub mod error;
 pub use error::{SwarmError, SwarmResult};
 
 pub mod tests;
+
+pub mod stream;
