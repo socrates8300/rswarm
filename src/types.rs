@@ -4,7 +4,7 @@ use crate::constants::{
     DEFAULT_API_VERSION, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, OPENAI_DEFAULT_API_URL,
     VALID_API_URL_PREFIXES,
 };
-use anyhow::Result;
+use anyhow::Error;
 use serde::ser::SerializeStruct;
 use serde::{
     de::{self, MapAccess, Visitor},
@@ -12,13 +12,15 @@ use serde::{
 };
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// A map of string key-value pairs used for context variables in agent interactions
+/// A map of string key–value pairs used for context variables in agent interactions.
 pub type ContextVariables = HashMap<String, String>;
 
-/// Represents instructions that can be given to an agent
+/// Represents instructions that can be given to an agent.
 ///
 /// Instructions can be either static text or a dynamic function that generates
 /// instructions based on context variables.
@@ -28,7 +30,7 @@ pub enum Instructions {
     Function(Arc<dyn Fn(ContextVariables) -> String + Send + Sync>),
 }
 
-/// Represents an AI agent with its configuration and capabilities
+/// Represents an AI agent with its configuration and capabilities.
 ///
 /// An agent is defined by its name, model, instructions, and available functions.
 #[derive(Clone)]
@@ -41,10 +43,10 @@ pub struct Agent {
     pub parallel_tool_calls: bool,
 }
 
-// Custom Debug implementation for Agent
+// Custom Debug implementation for Agent.
 impl fmt::Debug for Agent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Since we cannot print the functions, we can omit them from the Debug output
+        // Since we cannot print the functions (they may contain closures), we omit them.
         write!(
             f,
             "Agent {{ name: {}, model: {}, function_call: {:?}, parallel_tool_calls: {} }}",
@@ -53,7 +55,7 @@ impl fmt::Debug for Agent {
     }
 }
 
-// Custom Serialize implementation for Agent
+// Custom Serialize implementation for Agent.
 impl Serialize for Agent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -62,15 +64,14 @@ impl Serialize for Agent {
         let mut state = serializer.serialize_struct("Agent", 5)?;
         state.serialize_field("name", &self.name)?;
         state.serialize_field("model", &self.model)?;
-        // We cannot serialize `instructions` or `functions` since they may contain functions
-        // So we omit them
+        // We cannot serialize `instructions` or `functions` since they may contain closures.
         state.serialize_field("function_call", &self.function_call)?;
         state.serialize_field("parallel_tool_calls", &self.parallel_tool_calls)?;
         state.end()
     }
 }
 
-// Custom Deserialize implementation for Agent
+// Custom Deserialize implementation for Agent.
 impl<'de> Deserialize<'de> for Agent {
     fn deserialize<D>(deserializer: D) -> Result<Agent, D::Error>
     where
@@ -170,8 +171,8 @@ impl<'de> Deserialize<'de> for Agent {
                 Ok(Agent {
                     name,
                     model,
-                    instructions: Instructions::Text(String::new()), // default value
-                    functions: Vec::new(),                           // default value
+                    instructions: Instructions::Text(String::new()), // Default value.
+                    functions: Vec::new(),                           // Default value.
                     function_call,
                     parallel_tool_calls,
                 })
@@ -185,7 +186,55 @@ impl<'de> Deserialize<'de> for Agent {
     }
 }
 
-/// Configuration settings for the Swarm instance
+/// The result of an agent function execution.
+#[derive(Clone, Debug)]
+pub enum ResultType {
+    Value(String),
+    Agent(Agent),
+    ContextVariables(ContextVariables),
+}
+
+impl ResultType {
+    pub fn get_value(&self) -> String {
+        match self {
+            ResultType::Value(v) => v.clone(),
+            _ => String::new(),
+        }
+    }
+
+    pub fn get_agent(&self) -> Option<Agent> {
+        if let ResultType::Agent(agent) = self {
+            Some(agent.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn get_context_variables(&self) -> ContextVariables {
+        if let ResultType::ContextVariables(vars) = self {
+            vars.clone()
+        } else {
+            HashMap::new()
+        }
+    }
+}
+
+/// Represents an asynchronous agent function.
+///
+/// The function field now returns a pinned future that will output a
+/// `Result<ResultType, anyhow::Error>` when awaited.
+#[derive(Clone)]
+pub struct AgentFunction {
+    pub name: String,
+    pub function: Arc<
+        dyn Fn(ContextVariables) -> Pin<Box<dyn Future<Output = Result<ResultType, Error>> + Send>>
+            + Send
+            + Sync,
+    >,
+    pub accepts_context_variables: bool,
+}
+
+/// Configuration settings for the Swarm instance.
 #[derive(Clone, Debug)]
 pub struct SwarmConfig {
     pub api_url: String,
@@ -200,7 +249,7 @@ pub struct SwarmConfig {
     pub api_settings: ApiSettings,
 }
 
-/// Controls the execution of loops in agent interactions
+/// Controls the execution of loops in agent interactions.
 #[derive(Clone, Debug)]
 pub struct LoopControl {
     pub default_max_iterations: u32,
@@ -218,7 +267,7 @@ impl Default for LoopControl {
     }
 }
 
-/// API-related settings for request handling
+/// API related settings for request handling.
 #[derive(Clone, Debug)]
 pub struct ApiSettings {
     pub retry_strategy: RetryStrategy,
@@ -270,25 +319,7 @@ impl Default for SwarmConfig {
     }
 }
 
-/// Represents a function that can be called by an agent
-#[derive(Clone)]
-pub struct AgentFunction {
-    pub name: String,
-    pub function: Arc<dyn Fn(ContextVariables) -> Result<ResultType> + Send + Sync>,
-    pub accepts_context_variables: bool,
-}
-
-// Custom Debug for AgentFunction (omitting the function pointer)
-impl fmt::Debug for AgentFunction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "AgentFunction {{ name: {}, accepts_context_variables: {} }}",
-            self.name, self.accepts_context_variables
-        )
-    }
-}
-
+/// Represents a chat message.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
     pub role: String,
@@ -297,12 +328,14 @@ pub struct Message {
     pub function_call: Option<FunctionCall>,
 }
 
+/// Represents a function call inside a message.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FunctionCall {
     pub name: String,
     pub arguments: String,
 }
 
+/// The response from a chat completion request.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatCompletionResponse {
     pub id: String,
@@ -312,9 +345,10 @@ pub struct ChatCompletionResponse {
     pub usage: Option<Usage>,
 }
 
-/// In the original code the Choice struct was derived for Deserialize,
-/// but the API sometimes returns a "delta" field instead of "message."
-/// The custom deserializer below checks for "message" and if missing falls back to "delta."
+/// A choice returned from the chat completion response.
+///
+/// This custom deserializer checks for the presence of a "message" field and,
+/// if absent, falls back to a "delta" field.
 #[derive(Serialize, Clone, Debug)]
 pub struct Choice {
     pub index: u32,
@@ -327,7 +361,6 @@ impl<'de> Deserialize<'de> for Choice {
     where
         D: Deserializer<'de>,
     {
-        // First, deserialize the incoming value as a generic JSON Value.
         let value = serde_json::Value::deserialize(deserializer)?;
 
         let index = value
@@ -370,6 +403,7 @@ impl<'de> Deserialize<'de> for Choice {
     }
 }
 
+/// Token usage metrics for a chat completion.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Usage {
     pub prompt_tokens: u32,
@@ -377,38 +411,7 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
-#[derive(Clone, Debug)]
-pub enum ResultType {
-    Value(String),
-    Agent(Agent),
-    ContextVariables(ContextVariables),
-}
-
-impl ResultType {
-    pub fn get_value(&self) -> String {
-        match self {
-            ResultType::Value(v) => v.clone(),
-            _ => String::new(),
-        }
-    }
-
-    pub fn get_agent(&self) -> Option<Agent> {
-        if let ResultType::Agent(agent) = self {
-            Some(agent.clone())
-        } else {
-            None
-        }
-    }
-
-    pub fn get_context_variables(&self) -> ContextVariables {
-        if let ResultType::ContextVariables(vars) = self {
-            vars.clone()
-        } else {
-            HashMap::new()
-        }
-    }
-}
-
+/// Represents a complete chat response.
 #[derive(Clone, Debug)]
 pub struct Response {
     pub messages: Vec<Message>,
@@ -416,12 +419,14 @@ pub struct Response {
     pub context_variables: ContextVariables,
 }
 
+/// Represents a collection of steps parsed from XML.
 #[derive(Debug, Deserialize)]
 pub struct Steps {
     #[serde(rename = "step", default)]
     pub steps: Vec<Step>,
 }
 
+/// A single step in a steps definition.
 #[derive(Debug, Deserialize)]
 pub struct Step {
     #[serde(rename = "@number")]
@@ -429,10 +434,11 @@ pub struct Step {
     #[serde(rename = "@action")]
     pub action: String,
     #[serde(rename = "@agent")]
-    pub agent: Option<String>, // New field for agent name
+    pub agent: Option<String>,
     pub prompt: String,
 }
 
+/// Strategy used for retrying failed API calls.
 #[derive(Clone, Debug)]
 pub struct RetryStrategy {
     pub max_retries: u32,
@@ -441,6 +447,7 @@ pub struct RetryStrategy {
     pub backoff_factor: f32,
 }
 
+/// Timeout settings used for API calls.
 #[derive(Clone, Debug)]
 pub struct TimeoutSettings {
     pub request_timeout: Duration,
@@ -449,11 +456,13 @@ pub struct TimeoutSettings {
     pub write_timeout: Duration,
 }
 
+/// Represents an error response from OpenAI.
 #[derive(Debug, Deserialize)]
 pub struct OpenAIErrorResponse {
     pub error: OpenAIError,
 }
 
+/// The detailed OpenAI error.
 #[derive(Debug, Deserialize)]
 pub struct OpenAIError {
     pub message: String,

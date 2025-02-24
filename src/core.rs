@@ -1,28 +1,28 @@
-// rswarm/src/core.rs
+/*
+   File: rswarm/src/core.rs
+
+   This file implements the main Swarm struct that handles chat completions,
+   message history, function calls and step execution. Note that agent function
+   calls are now asynchronous and are awaited without blocking the runtime.
+*/
 
 use crate::constants::{
     CTX_VARS_NAME, MAX_REQUEST_TIMEOUT, MIN_REQUEST_TIMEOUT, OPENAI_DEFAULT_API_URL,
     ROLE_ASSISTANT, ROLE_FUNCTION, ROLE_SYSTEM,
 };
+use crate::error::{SwarmError, SwarmResult};
 use crate::types::{
     Agent, AgentFunction, ChatCompletionResponse, ContextVariables, FunctionCall, Instructions,
-    Message, OpenAIErrorResponse, Response, ResultType, SwarmConfig,
+    Message, OpenAIErrorResponse, Response, ResultType, Step, Steps, SwarmConfig,
 };
-
+use crate::util::{debug_print, extract_xml_steps, function_to_json, parse_steps_from_xml};
+use crate::validation::{validate_api_request, validate_api_url};
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
-#[allow(unused_imports)]
-use std::sync::Arc;
 use std::time::Duration;
-
-use crate::error::{SwarmError, SwarmResult};
-use crate::types::{Step, Steps};
-use crate::util::{debug_print, extract_xml_steps, function_to_json, parse_steps_from_xml};
-use crate::validation::validate_api_request;
-use crate::validation::validate_api_url;
 
 impl Default for Swarm {
     fn default() -> Self {
@@ -30,52 +30,15 @@ impl Default for Swarm {
     }
 }
 
-/// Main struct for managing AI agent interactions and chat completions
-///
-/// The Swarm struct provides the core functionality for managing AI agents,
-/// handling chat completions, and executing function calls. It maintains
-/// a registry of agents and handles API communication with OpenAI or compatible APIs.
-///
-/// # Examples
-///
-/// ```rust
-/// use rswarm::Swarm;
-///
-/// let swarm = Swarm::builder()
-///     .with_api_key("sk-test123456789".to_string())
-///     .with_api_url("https://api.openai.com/v1".to_string())
-///     .with_request_timeout(30)
-///     .build()
-///     .expect("Failed to create Swarm instance");
-/// ```
+/// Main struct for managing AI agent interactions and chat completions.
 pub struct Swarm {
     pub client: Client,
     pub api_key: String,
-    pub agent_registry: HashMap<String, Agent>, //
+    pub agent_registry: HashMap<String, Agent>,
     pub config: SwarmConfig,
 }
 
-/// Builder pattern implementation for creating Swarm instances
-///
-/// Provides a flexible way to configure and create a new Swarm instance
-/// with custom settings and validations. All configuration options have
-/// reasonable defaults but can be customized as needed.
-///
-/// # Examples
-///
-/// ```rust
-/// use rswarm::Swarm;
-/// use std::time::Duration;
-///
-/// let swarm = Swarm::builder()
-///     .with_api_key("sk-test123456789".to_string())
-///     .with_api_url("https://api.openai.com/v1".to_string())
-///     .with_request_timeout(30)
-///     .with_connect_timeout(10)
-///     .with_max_retries(3)
-///     .build()
-///     .expect("Failed to create Swarm instance");
-/// ```
+/// Builder pattern implementation for creating Swarm instances.
 pub struct SwarmBuilder {
     client: Option<Client>,
     api_key: Option<String>,
@@ -84,7 +47,6 @@ pub struct SwarmBuilder {
 }
 
 impl SwarmBuilder {
-    /// Creates a new SwarmBuilder instance with default configuration
     pub fn new() -> Self {
         let config = SwarmConfig::default();
         SwarmBuilder {
@@ -95,11 +57,6 @@ impl SwarmBuilder {
         }
     }
 
-    /// Sets a custom configuration for the Swarm
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - A SwarmConfig instance containing custom configuration values
     pub fn with_config(mut self, config: SwarmConfig) -> Self {
         self.config = config;
         self
@@ -167,29 +124,13 @@ impl SwarmBuilder {
         self
     }
 
-    /// Builds the Swarm instance with the configured settings
-    ///
-    /// # Returns
-    ///
-    /// Returns a Result containing either the configured Swarm instance
-    /// or a SwarmError if validation fails
-    ///
-    /// # Errors
-    ///
-    /// Will return an error if:
-    /// - API key is missing or invalid
-    /// - API URL validation fails
-    /// - Configuration validation fails
     pub fn build(self) -> SwarmResult<Swarm> {
-        // First validate the configuration
         self.config.validate()?;
 
-        // Validate all agents
         for agent in self.agents.values() {
             agent.validate(&self.config)?;
         }
 
-        // Get API key from builder or environment
         let api_key = match self.api_key.or_else(|| env::var("OPENAI_API_KEY").ok()) {
             Some(key) => key,
             None => {
@@ -199,7 +140,6 @@ impl SwarmBuilder {
             }
         };
 
-        // Validate API key
         if api_key.trim().is_empty() {
             return Err(SwarmError::ValidationError(
                 "API key cannot be empty".to_string(),
@@ -211,10 +151,8 @@ impl SwarmBuilder {
             ));
         }
 
-        // Get and validate API URL
         let api_url = self.config.api_url.clone();
 
-        // Validate API URL - non-HTTPS URLs should fail except for localhost
         if !api_url.starts_with("https://")
             && !api_url.starts_with("http://localhost")
             && !api_url.starts_with("http://127.0.0.1")
@@ -224,10 +162,8 @@ impl SwarmBuilder {
             ));
         }
 
-        // Additional URL validation from config
         validate_api_url(&api_url, &self.config)?;
 
-        // Create client with timeout configuration
         let client = self.client.unwrap_or_else(|| {
             Client::builder()
                 .timeout(Duration::from_secs(self.config.request_timeout))
@@ -244,9 +180,7 @@ impl SwarmBuilder {
         })
     }
 
-    // Add validation method
     fn _validate(&self) -> SwarmResult<()> {
-        // Validate API key if present
         if let Some(ref key) = self.api_key {
             if key.trim().is_empty() || !key.starts_with("sk-") {
                 return Err(SwarmError::ValidationError(
@@ -254,37 +188,17 @@ impl SwarmBuilder {
                 ));
             }
         }
-
-        // Validate config
         self.config.validate()?;
-
         Ok(())
     }
 }
 
 impl Swarm {
-    /// Creates a new SwarmBuilder instance
-    ///
-    /// This is the recommended way to create a new Swarm instance as it provides
-    /// a fluent interface for configuration and handles all necessary validation.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use rswarm::Swarm;
-    ///
-    /// let swarm = Swarm::builder()
-    ///     .with_api_key("sk-test123456789".to_string())
-    ///     .with_api_url("https://api.openai.com/v1".to_string())
-    ///     .with_request_timeout(30)
-    ///     .build()
-    ///     .expect("Failed to create Swarm instance");
-    /// ```
     pub fn builder() -> SwarmBuilder {
         SwarmBuilder::new()
     }
 
-    // Keep existing new() method for backward compatibility
+    // For backward compatibility.
     pub fn new(
         client: Option<Client>,
         api_key: Option<String>,
@@ -302,33 +216,7 @@ impl Swarm {
         builder.build()
     }
 
-    /// Makes a chat completion request to the OpenAI API
-    ///
-    /// Sends a request to the configured API endpoint with the provided agent configuration,
-    /// message history, and context variables. Supports both streaming and non-streaming responses.
-    ///
-    /// # Arguments
-    ///
-    /// * `agent` - The Agent configuration to use for the request
-    /// * `history` - Vector of previous messages in the conversation
-    /// * `context_variables` - Variables to be used in the conversation context
-    /// * `model_override` - Optional model to use instead of the agent's default
-    /// * `stream` - Whether to stream the response
-    /// * `debug` - Whether to enable debug output
-    ///
-    /// # Returns
-    ///
-    /// Returns a Result containing either the ChatCompletionResponse or a SwarmError
-    ///
-    /// # Errors
-    ///
-    /// Will return an error if:
-    /// - API key is invalid or empty
-    /// - Message history is empty
-    /// - Network request fails
-    /// - Response parsing fails
-    /// - API returns an error response
-    ///
+    /// Makes an asynchronous chat completion request.
     pub async fn get_chat_completion(
         &self,
         agent: &Agent,
@@ -338,7 +226,6 @@ impl Swarm {
         stream: bool,
         debug: bool,
     ) -> SwarmResult<ChatCompletionResponse> {
-        // Validate inputs
         if self.api_key.is_empty() {
             return Err(SwarmError::ValidationError(
                 "API key cannot be empty".to_string(),
@@ -367,10 +254,9 @@ impl Swarm {
 
         debug_print(
             debug,
-            &format!("Getting chat completion for...: {:?}", messages),
+            &format!("Getting chat completion with messages: {:?}", messages),
         );
 
-        // Convert agent functions to functions for the API
         let functions: Vec<Value> = agent
             .functions
             .iter()
@@ -401,17 +287,16 @@ impl Swarm {
                 if url.starts_with("http://localhost") || url.starts_with("http://127.0.0.1") {
                     Ok(url)
                 } else if !url.starts_with("https://") {
-                    return Err(SwarmError::ValidationError(
+                    Err(SwarmError::ValidationError(
                         "OPENAI_API_URL must start with https:// (except for localhost)"
                             .to_string(),
-                    ));
+                    ))
                 } else {
                     Ok(url)
                 }
             })
             .unwrap_or_else(|_| Ok(OPENAI_DEFAULT_API_URL.to_string()))?;
 
-        // Make the API request to OpenAI
         let response = self
             .client
             .post(url)
@@ -422,18 +307,12 @@ impl Swarm {
             .map_err(|e| SwarmError::NetworkError(e.to_string()))?;
 
         if !response.status().is_success() {
-            // Read the response body
             let error_text = response.text().await.map_err(|e| {
                 SwarmError::NetworkError(format!("Failed to read error response: {}", e))
             })?;
-
-            // Optionally log the error message for debugging
             debug_print(debug, &format!("API Error Response: {}", error_text));
-
-            // Attempt to deserialize into OpenAI's error format
             let api_error: serde_json::Result<OpenAIErrorResponse> =
                 serde_json::from_str(&error_text);
-
             return match api_error {
                 Ok(err_resp) => Err(SwarmError::ApiError(err_resp.error.message)),
                 Err(_) => Err(SwarmError::ApiError(error_text)),
@@ -441,9 +320,7 @@ impl Swarm {
         }
 
         if stream {
-            // Handle streaming response
             let mut stream = response.bytes_stream();
-
             let mut full_response = ChatCompletionResponse {
                 id: "".to_string(),
                 object: "chat.completion".to_string(),
@@ -456,7 +333,6 @@ impl Swarm {
                 match chunk_result {
                     Ok(data) => {
                         let text = String::from_utf8_lossy(&data);
-
                         for line in text.lines() {
                             if line.starts_with("data: ") {
                                 let json_str = line[6..].trim();
@@ -466,7 +342,6 @@ impl Swarm {
                                 let partial_response: serde_json::Result<ChatCompletionResponse> =
                                     serde_json::from_str(json_str);
                                 if let Ok(partial) = partial_response {
-                                    // Merge partial into full_response
                                     full_response.choices.extend(partial.choices);
                                 }
                             }
@@ -476,54 +351,29 @@ impl Swarm {
                         return Err(SwarmError::StreamError(format!(
                             "Error reading streaming response: {}",
                             e
-                        )));
+                        )))
                     }
                 }
             }
-
             Ok(full_response)
         } else {
-            // **Read the response body as text for better error handling**
             let response_text = response.text().await.map_err(|e| {
                 SwarmError::DeserializationError(format!("Failed to read response text: {}", e))
             })?;
-
-            // Optionally log the response body for debugging
             debug_print(debug, &format!("API Response: {}", response_text));
-
-            // Deserialize the successful response
             serde_json::from_str::<ChatCompletionResponse>(&response_text)
                 .map_err(|e| SwarmError::DeserializationError(e.to_string()))
         }
     }
 
-    pub fn handle_function_result(
-        &self,
-        result: ResultType,
-        debug: bool,
-    ) -> SwarmResult<ResultType> {
-        match result {
-            ResultType::Value(_) | ResultType::Agent(_) => Ok(result),
-            _ => {
-                let error_message = format!(
-                    "Failed to cast response to string: {:?}. \
-                    Make sure agent functions return a string or ResultType object.",
-                    result
-                );
-                debug_print(debug, &error_message);
-                Err(SwarmError::FunctionError(error_message))
-            }
-        }
-    }
-
-    pub fn handle_function_call(
+    /// Asynchronously handles a function call from an agent.
+    pub async fn handle_function_call(
         &self,
         function_call: &FunctionCall,
         functions: &[AgentFunction],
         context_variables: &mut ContextVariables,
         debug: bool,
     ) -> SwarmResult<Response> {
-        // Validate function_call.name
         if function_call.name.trim().is_empty() {
             return Err(SwarmError::ValidationError(
                 "Function call name cannot be empty.".to_string(),
@@ -541,14 +391,13 @@ impl Swarm {
             context_variables: HashMap::new(),
         };
 
-        let name = &function_call.name;
-        if let Some(func) = function_map.get(name) {
+        if let Some(func) = function_map.get(&function_call.name) {
             let args: ContextVariables = serde_json::from_str(&function_call.arguments)?;
             debug_print(
                 debug,
                 &format!(
                     "Processing function call: {} with arguments {:?}",
-                    name, args
+                    function_call.name, args
                 ),
             );
 
@@ -558,17 +407,15 @@ impl Swarm {
                 args.insert(CTX_VARS_NAME.to_string(), serialized_context);
             }
 
-            let raw_result = (func.function)(args)?;
-
+            // Await the asynchronous call.
+            let raw_result = (func.function)(args).await?;
             let result = self.handle_function_result(raw_result, debug)?;
-
             response.messages.push(Message {
                 role: ROLE_FUNCTION.to_string(),
-                name: Some(name.clone()),
+                name: Some(function_call.name.clone()),
                 content: Some(result.get_value()),
                 function_call: None,
             });
-
             response
                 .context_variables
                 .extend(result.get_context_variables());
@@ -576,18 +423,40 @@ impl Swarm {
                 response.agent = Some(agent);
             }
         } else {
-            debug_print(debug, &format!("Function {} not found.", name));
+            debug_print(
+                debug,
+                &format!("Function {} not found.", function_call.name),
+            );
             response.messages.push(Message {
                 role: ROLE_ASSISTANT.to_string(),
-                name: Some(name.clone()),
-                content: Some(format!("Error: Function {} not found.", name)),
+                name: Some(function_call.name.clone()),
+                content: Some(format!("Error: Function {} not found.", function_call.name)),
                 function_call: None,
             });
         }
-
         Ok(response)
     }
 
+    /// Handles the result of a function call.
+    pub fn handle_function_result(
+        &self,
+        result: ResultType,
+        debug: bool,
+    ) -> SwarmResult<ResultType> {
+        match result {
+            ResultType::Value(_) | ResultType::Agent(_) => Ok(result),
+            _ => {
+                let error_message = format!(
+                    "Failed to cast response to string: {:?}. Ensure agent functions return a string or ResultType.",
+                    result
+                );
+                debug_print(debug, &error_message);
+                Err(SwarmError::FunctionError(error_message))
+            }
+        }
+    }
+
+    /// Executes a single round of conversation with the agent.
     async fn single_execution(
         &self,
         agent: &Agent,
@@ -607,32 +476,22 @@ impl Swarm {
                 debug,
             )
             .await?;
-
         if completion.choices.is_empty() {
             return Err(SwarmError::ApiError(
                 "No choices returned from the model".to_string(),
             ));
         }
-
         let choice = &completion.choices[0];
         let message = choice.message.clone();
-
         history.push(message.clone());
 
-        // Handle function calls if any
         if let Some(function_call) = &message.function_call {
-            let func_response = self.handle_function_call(
-                function_call,
-                &agent.functions,
-                context_variables,
-                debug,
-            )?;
-
+            // Await the asynchronous function call handler.
+            let func_response = self
+                .handle_function_call(function_call, &agent.functions, context_variables, debug)
+                .await?;
             history.extend(func_response.messages.clone());
             context_variables.extend(func_response.context_variables);
-
-            // If the function returns a new agent, we need to handle it
-            // (In this implementation, we are not changing the agent here)
         }
 
         Ok(Response {
@@ -642,6 +501,7 @@ impl Swarm {
         })
     }
 
+    /// Executes a step based on the provided XML–defined step.
     async fn execute_step(
         &self,
         agent: &mut Agent,
@@ -654,13 +514,11 @@ impl Swarm {
         step_number: usize,
         step: &Step,
     ) -> SwarmResult<Response> {
-        // Validate step
         if step.prompt.trim().is_empty() {
             return Err(SwarmError::ValidationError(
                 "Step prompt cannot be empty".to_string(),
             ));
         }
-
         if step.number == 0 {
             return Err(SwarmError::ValidationError(
                 "Step number must be greater than 0".to_string(),
@@ -669,7 +527,6 @@ impl Swarm {
 
         println!("Executing Step {}", step_number);
 
-        // Handle agent handoff if an agent is specified in the step
         if let Some(agent_name) = &step.agent {
             println!("Switching to agent: {}", agent_name);
             *agent = self.get_agent_by_name(agent_name)?;
@@ -677,17 +534,13 @@ impl Swarm {
 
         match step.action.as_str() {
             "run_once" => {
-                // Prepare a message with the step's prompt
                 let step_message = Message {
                     role: "user".to_string(),
                     content: Some(step.prompt.clone()),
                     name: None,
                     function_call: None,
                 };
-
                 history.push(step_message);
-
-                // Proceed with a single execution
                 self.single_execution(
                     agent,
                     history,
@@ -700,21 +553,16 @@ impl Swarm {
             }
             "loop" => {
                 let mut iteration_count = 0;
-                let max_iterations = 10; // Define a suitable maximum
-
+                let max_iterations = 10;
                 loop {
                     iteration_count += 1;
-
-                    // Prepare a message with the step's prompt
                     let step_message = Message {
                         role: "user".to_string(),
                         content: Some(step.prompt.clone()),
                         name: None,
                         function_call: None,
                     };
-
                     history.push(step_message);
-
                     let response = self
                         .single_execution(
                             agent,
@@ -725,25 +573,17 @@ impl Swarm {
                             debug,
                         )
                         .await?;
-
-                    // Handle agent change within the response
                     if let Some(new_agent) = response.agent.clone() {
                         *agent = new_agent;
                     }
-
-                    // Decide when to break the loop
                     if context_variables.get("end_loop") == Some(&"true".to_string()) {
                         println!("Loop termination condition met.");
                         break;
                     }
-
-                    // Prevent infinite loops with a max iteration count
                     if iteration_count >= max_iterations {
                         println!("Reached maximum loop iterations.");
                         break;
                     }
-
-                    // Optional: Add a condition to prevent exceeding max_turns
                     if history.len() >= max_turns {
                         println!("Max turns reached in loop, exiting.");
                         break;
@@ -765,41 +605,7 @@ impl Swarm {
         }
     }
 
-    pub fn get_agent_by_name(&self, name: &str) -> SwarmResult<Agent> {
-        self.agent_registry
-            .get(name)
-            .cloned()
-            .ok_or_else(|| SwarmError::AgentNotFoundError(name.to_string()))
-    }
-
-    /// Executes a conversation with an AI agent
-    ///
-    /// Manages a multi-turn conversation with an AI agent, handling message history,
-    /// function calls, and optional XML-defined execution steps. Supports both
-    /// single-execution and loop-based conversation flows.
-    ///
-    /// # Arguments
-    ///
-    /// * `agent` - The Agent to use for the conversation
-    /// * `messages` - Initial messages to start the conversation
-    /// * `context_variables` - Variables to be used in the conversation
-    /// * `model_override` - Optional model to use instead of the agent's default
-    /// * `stream` - Whether to stream the response
-    /// * `debug` - Whether to enable debug output
-    /// * `max_turns` - Maximum number of conversation turns
-    ///
-    /// # Returns
-    ///
-    /// Returns a Result containing either the Response or a SwarmError
-    ///
-    /// # Errors
-    ///
-    /// Will return an error if:
-    /// - Input validation fails
-    /// - Max turns exceeds configuration limits
-    /// - API requests fail
-    /// - Step execution fails
-    ///
+    /// Executes a multi-turn conversation with the AI agent.
     pub async fn run(
         &self,
         mut agent: Agent,
@@ -810,10 +616,8 @@ impl Swarm {
         debug: bool,
         max_turns: usize,
     ) -> SwarmResult<Response> {
-        // Use config for validation
         validate_api_request(&agent, &messages, &model_override, max_turns)?;
 
-        // Use config values for loop control
         if max_turns > self.config.max_loop_iterations as usize {
             return Err(SwarmError::ValidationError(format!(
                 "max_turns ({}) exceeds configured max_loop_iterations ({})",
@@ -821,7 +625,6 @@ impl Swarm {
             )));
         }
 
-        // Extract XML steps from the agent's instructions
         let instructions = match &agent.instructions {
             Instructions::Text(text) => text.clone(),
             Instructions::Function(func) => func(context_variables.clone()),
@@ -829,20 +632,15 @@ impl Swarm {
 
         let (instructions_without_xml, xml_steps) = extract_xml_steps(&instructions)?;
 
-        // Parse the steps from XML
         let steps = if let Some(xml_content) = xml_steps {
             parse_steps_from_xml(&xml_content)?
         } else {
             Steps { steps: Vec::new() }
         };
 
-        // Set the agent's instructions without the XML steps
         agent.instructions = Instructions::Text(instructions_without_xml);
-
-        // Prepare history
         let mut history = messages.clone();
 
-        // If there are steps, execute them
         if !steps.steps.is_empty() {
             for step in &steps.steps {
                 let response = self
@@ -858,18 +656,12 @@ impl Swarm {
                         step,
                     )
                     .await?;
-
-                // Handle agent change
                 if let Some(new_agent) = response.agent {
                     agent = new_agent;
                 }
-
-                // Optionally handle context variables or messages after each step
             }
         } else {
-            // No steps, proceed with a default execution if necessary
             println!("No steps defined. Executing default behavior.");
-
             let response = self
                 .single_execution(
                     &agent,
@@ -880,7 +672,6 @@ impl Swarm {
                     debug,
                 )
                 .await?;
-
             history.extend(response.messages);
             context_variables.extend(response.context_variables);
         }
@@ -890,6 +681,13 @@ impl Swarm {
             agent: Some(agent),
             context_variables,
         })
+    }
+
+    pub fn get_agent_by_name(&self, name: &str) -> SwarmResult<Agent> {
+        self.agent_registry
+            .get(name)
+            .cloned()
+            .ok_or_else(|| SwarmError::AgentNotFoundError(name.to_string()))
     }
 }
 
@@ -927,28 +725,22 @@ impl SwarmConfig {
                 "default_max_iterations must be greater than 0".to_string(),
             ));
         }
-
         Ok(())
     }
 }
 
 impl Agent {
     pub fn validate(&self, config: &SwarmConfig) -> SwarmResult<()> {
-        // Validate name
         if self.name.trim().is_empty() {
             return Err(SwarmError::ValidationError(
                 "Agent name cannot be empty".to_string(),
             ));
         }
-
-        // Validate model
         if self.model.trim().is_empty() {
             return Err(SwarmError::ValidationError(
                 "Agent model cannot be empty".to_string(),
             ));
         }
-
-        // Validate model prefix
         if !config
             .valid_model_prefixes
             .iter()
@@ -959,18 +751,15 @@ impl Agent {
                 config.valid_model_prefixes
             )));
         }
-
-        // Validate instructions
         match &self.instructions {
             Instructions::Text(text) if text.trim().is_empty() => {
                 return Err(SwarmError::ValidationError(
                     "Agent instructions cannot be empty".to_string(),
                 ));
             }
-            Instructions::Function(_) => {} // Function instructions are validated at runtime
+            Instructions::Function(_) => {} // Function instructions are validated at runtime.
             _ => {}
         }
-
         Ok(())
     }
 }

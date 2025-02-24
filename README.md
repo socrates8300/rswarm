@@ -241,19 +241,25 @@ Adjust parameters like timeouts and retries based on application needs.
 
 ### Agent Functions
 
-Agents can execute custom functions, extending their capabilities.
+**Note:** In rswarm version 2.0, the `AgentFunction` has been refactored to be asynchronous. This means that the stored function must now return a pinned boxed future (using `Box::pin(async move { ... })`) rather than a plain synchronous result. This change removes the need for blocking calls and makes integration with asynchronous runtimes seamless.
 
 #### Defining Agent Functions
 
+Below is an updated example:
+
 ```rust
 use rswarm::{AgentFunction, ContextVariables, ResultType};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 let echo_function = AgentFunction {
     name: "echo".to_string(),
-    function: Arc::new(|args: ContextVariables| {
-        let message = args.get("message").cloned().unwrap_or_default();
-        Ok(ResultType::Value(message))
+    function: Arc::new(|args: ContextVariables| -> Pin<Box<dyn Future<Output = Result<ResultType, anyhow::Error>> + Send>> {
+        Box::pin(async move {
+            let message = args.get("message").cloned().unwrap_or_default();
+            Ok(ResultType::Value(message))
+        })
     }),
     accepts_context_variables: true,
 };
@@ -297,13 +303,17 @@ Define a function, add it to the agent, and then proceed with a conversation:
 
 ```rust
 use rswarm::{AgentFunction, ContextVariables, ResultType};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 let echo_function = AgentFunction {
     name: "echo".to_string(),
-    function: Arc::new(|args: ContextVariables| {
-        let message = args.get("message").cloned().unwrap_or_default();
-        Ok(ResultType::Value(message))
+    function: Arc::new(|args: ContextVariables| -> Pin<Box<dyn Future<Output = Result<ResultType, anyhow::Error>> + Send>> {
+        Box::pin(async move {
+            let message = args.get("message").cloned().unwrap_or_default();
+            Ok(ResultType::Value(message))
+        })
     }),
     accepts_context_variables: true,
 };
@@ -444,15 +454,15 @@ pub struct Agent {
 ```rust
 pub struct AgentFunction {
     pub name: String,
-    pub function: Arc<dyn Fn(ContextVariables) -> Result<ResultType> + Send + Sync>,
+    pub function: Arc<dyn Fn(ContextVariables) -> Pin<Box<dyn Future<Output = Result<ResultType, anyhow::Error>> + Send>> + Send + Sync>,
     pub accepts_context_variables: bool,
 }
 ```
 
-**Purpose**: Enables agents to execute custom logic.
+**Purpose**: Enables agents to execute custom logic asynchronously.
 **Fields**:
 - `name`: Identifier for the function.
-- `function`: The executable function logic.
+- `function`: The asynchronous function logic.
 - `accepts_context_variables`: Indicates if context variables are used.
 
 ### SwarmConfig Struct
@@ -530,3 +540,9 @@ A heartfelt thank you to all contributors and the Rust community. Your support a
 Feel free to explore the library further, contribute to its development, or reach out with questions. Together, we can continue to push the boundaries of what’s possible with Rust and AI.
 
 Happy coding!
+```
+
+────────────────────────────
+Note:
+In this version, the `AgentFunction` struct now requires that the function field return an asynchronous pinned boxed future. This means that when defining agent functions, wrap your function body using `Box::pin(async move { ... })` to produce the correct return type.
+────────────────────────────
