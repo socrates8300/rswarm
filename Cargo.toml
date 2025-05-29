@@ -7,6 +7,8 @@ version = "0.1.7"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "A Rust implementation of the Swarm framework"
+homepage = "https://github.com/socrates8300/rswarm"
+repository = "https://github.com/socrates8300/rswarm"
 
 [dependencies]
 actix-web = "4.9.0"
