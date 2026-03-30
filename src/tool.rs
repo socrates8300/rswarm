@@ -109,12 +109,14 @@ impl InvocationArgs {
                             key
                         )))
                     }
-                    Value::Array(_) | Value::Object(_) => serde_json::to_string(value).map_err(|error| {
-                        ToolError::Validation(format!(
-                            "Failed to serialize nested argument '{}': {}",
-                            key, error
-                        ))
-                    })?,
+                    Value::Array(_) | Value::Object(_) => {
+                        serde_json::to_string(value).map_err(|error| {
+                            ToolError::Validation(format!(
+                                "Failed to serialize nested argument '{}': {}",
+                                key, error
+                            ))
+                        })?
+                    }
                 };
                 Ok((key.clone(), value))
             })
@@ -126,7 +128,11 @@ impl InvocationArgs {
     }
 }
 
-fn validate_value_against_schema(path: &str, value: &Value, schema: &Value) -> Result<(), ToolError> {
+fn validate_value_against_schema(
+    path: &str,
+    value: &Value,
+    schema: &Value,
+) -> Result<(), ToolError> {
     if let Some(expected_type) = schema.get("type").and_then(Value::as_str) {
         let type_matches = match expected_type {
             "string" => value.is_string(),
@@ -197,7 +203,7 @@ fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolSchema {
     pub name: String,
     pub description: String,
@@ -206,9 +212,17 @@ pub struct ToolSchema {
 
 impl ToolSchema {
     pub fn from_tool<T: Tool + ?Sized>(tool: &T) -> Self {
+        let description = tool.description().to_string();
+        if description.is_empty() {
+            tracing::warn!(
+                tool = %tool.name(),
+                "ToolSchema: tool '{}' has no description — LLM may misuse it",
+                tool.name()
+            );
+        }
         Self {
             name: tool.name().to_string(),
-            description: tool.description().to_string(),
+            description,
             parameters: tool.parameters_schema(),
         }
     }
@@ -218,10 +232,10 @@ impl ToolSchema {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallSpec {
-    pub id: String,
-    pub name: String,
+    id: String,
+    name: String,
     #[serde(rename = "arguments")]
     pub args: InvocationArgs,
 }
@@ -235,12 +249,20 @@ impl ToolCallSpec {
         })
     }
 
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     pub fn args(&self) -> &InvocationArgs {
         &self.args
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum ToolResult {
     Success {
@@ -258,7 +280,12 @@ pub enum ToolResult {
 }
 
 impl ToolResult {
-    pub fn success(call_id: impl Into<String>, name: impl Into<String>, result: Value, duration_ms: u64) -> Self {
+    pub fn success(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        result: Value,
+        duration_ms: u64,
+    ) -> Self {
         Self::Success {
             call_id: call_id.into(),
             name: name.into(),
@@ -267,7 +294,12 @@ impl ToolResult {
         }
     }
 
-    pub fn failure(call_id: impl Into<String>, name: impl Into<String>, error: String, duration_ms: u64) -> Self {
+    pub fn failure(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        error: String,
+        duration_ms: u64,
+    ) -> Self {
         Self::Failure {
             call_id: call_id.into(),
             name: name.into(),
@@ -369,7 +401,7 @@ pub struct ClosureTool {
 
 impl ClosureTool {
     pub fn from_agent_function(agent_fn: AgentFunction) -> Self {
-        let name = agent_fn.name.clone();
+        let name = agent_fn.name().to_string();
         Self {
             name,
             description: String::new(),

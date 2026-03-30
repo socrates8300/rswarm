@@ -20,7 +20,10 @@ mod tests {
 
         assert_eq!(deserialized.name(), "serde_agent");
         assert_eq!(deserialized.model(), "gpt-4");
-        assert_eq!(deserialized.tool_call_execution(), ToolCallExecution::Parallel);
+        assert_eq!(
+            deserialized.tool_call_execution(),
+            ToolCallExecution::Parallel
+        );
         assert!(deserialized.functions().is_empty());
         match deserialized.instructions() {
             Instructions::Text(text) => assert_eq!(text, "Round-trip me"),

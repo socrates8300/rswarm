@@ -1,11 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use crate::{Swarm, SwarmConfig, Agent, Instructions, SwarmError};
     use crate::constants::OPENAI_DEFAULT_API_URL;
+    use crate::{Agent, Instructions, Swarm, SwarmConfig, SwarmError};
     use reqwest::Client;
     use std::time::Duration;
-
-
 
     #[test]
     fn test_invalid_api_url() {
@@ -133,8 +131,14 @@ mod tests {
 
         assert_eq!(swarm.config().api_url(), default_config.api_url());
         assert_eq!(swarm.config().api_version(), default_config.api_version());
-        assert_eq!(swarm.config().request_timeout(), default_config.request_timeout());
-        assert_eq!(swarm.config().connect_timeout(), default_config.connect_timeout());
+        assert_eq!(
+            swarm.config().request_timeout(),
+            default_config.request_timeout()
+        );
+        assert_eq!(
+            swarm.config().connect_timeout(),
+            default_config.connect_timeout()
+        );
         assert_eq!(swarm.config().max_retries(), default_config.max_retries());
         assert_eq!(
             swarm.config().max_loop_iterations(),

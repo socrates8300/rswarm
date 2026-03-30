@@ -6,12 +6,11 @@ use crate::constants::{
 };
 use crate::error::{SwarmError, SwarmResult};
 use crate::phase::TerminationReason;
-use anyhow::Error;
-use serde_json::Value;
 use serde::{
     de::{self},
     Deserialize, Deserializer, Serialize, Serializer,
 };
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -22,6 +21,8 @@ use url::Url;
 
 /// A map of string key–value pairs used for context variables in agent interactions.
 pub type ContextVariables = HashMap<String, String>;
+pub type AgentFuture = Pin<Box<dyn Future<Output = Result<ResultType, SwarmError>> + Send>>;
+pub type AgentFunctionHandler = dyn Fn(ContextVariables) -> AgentFuture + Send + Sync;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ApiKey(String);
@@ -105,12 +106,13 @@ impl ApiUrl {
         let value = value.into();
 
         if value.trim().is_empty() {
-            return Err(SwarmError::ValidationError("API URL cannot be empty".to_string()));
+            return Err(SwarmError::ValidationError(
+                "API URL cannot be empty".to_string(),
+            ));
         }
 
-        let parsed = Url::parse(&value).map_err(|e| {
-            SwarmError::ValidationError(format!("Invalid API URL format: {}", e))
-        })?;
+        let parsed = Url::parse(&value)
+            .map_err(|e| SwarmError::ValidationError(format!("Invalid API URL format: {}", e)))?;
 
         let host = parsed.host_str();
         let is_localhost = matches!(host, Some("localhost") | Some("127.0.0.1"));
@@ -195,10 +197,7 @@ impl ModelId {
         if !prefixes.iter().any(|prefix| prefix.matches(&value)) {
             return Err(SwarmError::ValidationError(format!(
                 "Invalid model prefix. Model must start with one of: {:?}",
-                prefixes
-                    .iter()
-                    .map(ModelPrefix::as_str)
-                    .collect::<Vec<_>>()
+                prefixes.iter().map(ModelPrefix::as_str).collect::<Vec<_>>()
             )));
         }
         Ok(Self(value))
@@ -225,8 +224,8 @@ impl RequestTimeoutSeconds {
                 "request_timeout must be greater than 0".to_string(),
             ));
         }
-        if value < crate::constants::MIN_REQUEST_TIMEOUT
-            || value > crate::constants::MAX_REQUEST_TIMEOUT
+        if !(crate::constants::MIN_REQUEST_TIMEOUT..=crate::constants::MAX_REQUEST_TIMEOUT)
+            .contains(&value)
         {
             return Err(SwarmError::ValidationError(format!(
                 "request_timeout must be between {} and {} seconds",
@@ -309,7 +308,7 @@ pub enum Instructions {
 /// Represents an AI agent with its configuration and capabilities.
 ///
 /// An agent is defined by its name, model, instructions, and available functions.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FunctionCallPolicy {
     Disabled,
     Auto,
@@ -347,6 +346,7 @@ pub struct Agent {
     pub(crate) functions: Vec<AgentFunction>,
     pub(crate) function_call: FunctionCallPolicy,
     pub(crate) parallel_tool_calls: ToolCallExecution,
+    pub(crate) expected_response_fields: Vec<String>,
 }
 
 // Custom Debug implementation for Agent.
@@ -377,6 +377,7 @@ impl Agent {
             functions: Vec::new(),
             function_call: FunctionCallPolicy::Disabled,
             parallel_tool_calls: ToolCallExecution::Serial,
+            expected_response_fields: Vec::new(),
         };
         agent.validate_intrinsic_fields()?;
         Ok(agent)
@@ -395,6 +396,22 @@ impl Agent {
     pub fn with_tool_call_execution(mut self, parallel_tool_calls: ToolCallExecution) -> Self {
         self.parallel_tool_calls = parallel_tool_calls;
         self
+    }
+
+    pub fn with_expected_response_fields(
+        mut self,
+        expected_response_fields: Vec<String>,
+    ) -> SwarmResult<Self> {
+        if expected_response_fields
+            .iter()
+            .any(|field| field.trim().is_empty())
+        {
+            return Err(SwarmError::ValidationError(
+                "Expected response fields cannot contain empty entries".to_string(),
+            ));
+        }
+        self.expected_response_fields = expected_response_fields;
+        Ok(self)
     }
 
     pub fn name(&self) -> &str {
@@ -419,6 +436,10 @@ impl Agent {
 
     pub fn tool_call_execution(&self) -> ToolCallExecution {
         self.parallel_tool_calls
+    }
+
+    pub fn expected_response_fields(&self) -> &[String] {
+        &self.expected_response_fields
     }
 
     pub(crate) fn validate_intrinsic_fields(&self) -> SwarmResult<()> {
@@ -456,6 +477,8 @@ struct AgentTransport {
     function_call: Option<String>,
     #[serde(default)]
     parallel_tool_calls: bool,
+    #[serde(default)]
+    expected_response_fields: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -490,7 +513,7 @@ impl TryFrom<AgentTransport> for Agent {
             Some(policy) => FunctionCallPolicy::Named(policy),
         };
 
-        Ok(Agent::new(
+        Agent::new(
             value.name,
             value.model,
             Instructions::Text(value.instructions.text),
@@ -500,7 +523,8 @@ impl TryFrom<AgentTransport> for Agent {
             ToolCallExecution::Parallel
         } else {
             ToolCallExecution::Serial
-        }))
+        })
+        .with_expected_response_fields(value.expected_response_fields)
     }
 }
 
@@ -531,6 +555,7 @@ impl Serialize for Agent {
             functions: Vec::new(),
             function_call: self.function_call.to_wire_value(),
             parallel_tool_calls: self.parallel_tool_calls.is_parallel(),
+            expected_response_fields: self.expected_response_fields.clone(),
         }
         .serialize(serializer)
     }
@@ -590,17 +615,115 @@ impl ResultType {
 
 /// Represents an asynchronous agent function.
 ///
-/// The function field now returns a pinned future that will output a
-/// `Result<ResultType, anyhow::Error>` when awaited.
+/// The function field returns a pinned future that outputs
+/// `Result<ResultType, SwarmError>` when awaited.
 #[derive(Clone)]
 pub struct AgentFunction {
-    pub name: String,
-    pub function: Arc<
-        dyn Fn(ContextVariables) -> Pin<Box<dyn Future<Output = Result<ResultType, Error>> + Send>>
-            + Send
-            + Sync,
-    >,
-    pub accepts_context_variables: bool,
+    name: String,
+    pub(crate) function: Arc<AgentFunctionHandler>,
+    accepts_context_variables: bool,
+    description: String,
+    parameters_schema: Value,
+}
+
+impl AgentFunction {
+    pub fn new(
+        name: impl Into<String>,
+        function: Arc<AgentFunctionHandler>,
+        accepts_context_variables: bool,
+    ) -> SwarmResult<Self> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(SwarmError::ValidationError(
+                "AgentFunction name cannot be empty".to_string(),
+            ));
+        }
+        Ok(Self {
+            name,
+            function,
+            accepts_context_variables,
+            description: String::new(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+            }),
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn accepts_context_variables(&self) -> bool {
+        self.accepts_context_variables
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn parameters_schema(&self) -> &Value {
+        &self.parameters_schema
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    pub fn with_parameters_schema(mut self, schema: Value) -> SwarmResult<Self> {
+        if !schema.is_object() {
+            return Err(SwarmError::ValidationError(
+                "AgentFunction parameter schema must be a JSON object".to_string(),
+            ));
+        }
+        self.parameters_schema = schema;
+        Ok(self)
+    }
+
+    /// Invoke the function, passing `args` only if `accepts_context_variables` is true.
+    pub async fn invoke(&self, args: ContextVariables) -> Result<ResultType, SwarmError> {
+        let actual_args = if self.accepts_context_variables {
+            args
+        } else {
+            ContextVariables::new()
+        };
+        (self.function)(actual_args).await
+    }
+}
+
+/// Per-run resource limits applied by the budget enforcer (task #40).
+///
+/// All fields are `Option<_>`: `None` means "no limit enforced". Defaults to
+/// all limits disabled so existing in-memory workflows are unaffected.
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeLimits {
+    /// Maximum total tokens (prompt + completion) allowed across the run.
+    pub token_budget: Option<u32>,
+
+    /// Maximum number of tokens allowed per individual LLM request.
+    pub max_tokens_per_request: Option<u32>,
+
+    /// Maximum wall-clock seconds the run may take before being terminated.
+    pub max_wall_time_secs: Option<u64>,
+
+    /// Maximum number of tool calls across the entire run.
+    pub max_tool_calls: Option<u32>,
+
+    /// Maximum recursion depth (agent-handoff nesting level).
+    pub max_depth: Option<u32>,
+}
+
+impl RuntimeLimits {
+    /// Returns `true` when at least one limit is configured.
+    pub fn any_limit_set(&self) -> bool {
+        self.token_budget.is_some()
+            || self.max_tokens_per_request.is_some()
+            || self.max_wall_time_secs.is_some()
+            || self.max_tool_calls.is_some()
+            || self.max_depth.is_some()
+    }
 }
 
 /// Configuration settings for the Swarm instance.
@@ -616,78 +739,148 @@ pub struct SwarmConfig {
     valid_api_url_prefixes: Vec<ApiUrlPrefix>,
     loop_control: LoopControl,
     api_settings: ApiSettings,
+    /// Optional per-run resource caps enforced by the budget enforcer.
+    pub runtime_limits: RuntimeLimits,
 }
 
 /// Controls the execution of loops in agent interactions.
 #[derive(Clone, Debug)]
 pub struct LoopControl {
-    pub default_max_iterations: u32,
-    pub iteration_delay: Duration,
-    pub break_conditions: Vec<String>,
+    default_max_iterations: u32,
+    iteration_delay: Duration,
+    break_conditions: Vec<String>,
+}
+
+impl LoopControl {
+    pub fn new(
+        default_max_iterations: u32,
+        iteration_delay: Duration,
+        break_conditions: Vec<String>,
+    ) -> SwarmResult<Self> {
+        if default_max_iterations == 0 {
+            return Err(SwarmError::ValidationError(
+                "default_max_iterations must be greater than 0".to_string(),
+            ));
+        }
+        Ok(Self {
+            default_max_iterations,
+            iteration_delay,
+            break_conditions,
+        })
+    }
+
+    pub fn default_max_iterations(&self) -> u32 {
+        self.default_max_iterations
+    }
+
+    pub fn iteration_delay(&self) -> Duration {
+        self.iteration_delay
+    }
+
+    pub fn break_conditions(&self) -> &[String] {
+        &self.break_conditions
+    }
+
+    pub(crate) fn set_default_max_iterations(&mut self, value: u32) -> SwarmResult<()> {
+        if value == 0 {
+            return Err(SwarmError::ValidationError(
+                "default_max_iterations must be greater than 0".to_string(),
+            ));
+        }
+        self.default_max_iterations = value;
+        Ok(())
+    }
 }
 
 impl Default for LoopControl {
     fn default() -> Self {
-        LoopControl {
-            default_max_iterations: 10,
-            iteration_delay: Duration::from_millis(100),
-            break_conditions: vec!["end_loop".to_string()],
-        }
+        Self::new(10, Duration::from_millis(100), vec!["end_loop".to_string()])
+            .expect("SAFETY: 10 > 0")
     }
 }
 
 /// API related settings for request handling.
 #[derive(Clone, Debug)]
 pub struct ApiSettings {
-    pub retry_strategy: RetryStrategy,
-    pub timeout_settings: TimeoutSettings,
+    retry_strategy: RetryStrategy,
+    timeout_settings: TimeoutSettings,
+}
+
+impl ApiSettings {
+    pub fn retry_strategy(&self) -> &RetryStrategy {
+        &self.retry_strategy
+    }
+
+    pub fn timeout_settings(&self) -> &TimeoutSettings {
+        &self.timeout_settings
+    }
+
+    pub(crate) fn retry_strategy_mut(&mut self) -> &mut RetryStrategy {
+        &mut self.retry_strategy
+    }
+
+    pub(crate) fn timeout_settings_mut(&mut self) -> &mut TimeoutSettings {
+        &mut self.timeout_settings
+    }
 }
 
 impl Default for ApiSettings {
     fn default() -> Self {
         ApiSettings {
-            retry_strategy: RetryStrategy {
-                max_retries: 3,
-                initial_delay: Duration::from_secs(1),
-                max_delay: Duration::from_secs(30),
-                backoff_factor: 2.0,
-            },
-            timeout_settings: TimeoutSettings {
-                request_timeout: Duration::from_secs(30),
-                connect_timeout: Duration::from_secs(10),
-                read_timeout: Duration::from_secs(30),
-                write_timeout: Duration::from_secs(30),
-            },
+            retry_strategy: RetryStrategy::new(
+                3,
+                Duration::from_secs(1),
+                Duration::from_secs(30),
+                2.0,
+            )
+            .expect("SAFETY: default retry strategy values are all valid"),
+            timeout_settings: TimeoutSettings::new(
+                Duration::from_secs(30),
+                Duration::from_secs(10),
+                Duration::from_secs(30),
+                Duration::from_secs(30),
+            )
+            .expect("SAFETY: default timeout values are all non-zero"),
         }
     }
 }
 
 impl Default for SwarmConfig {
     fn default() -> Self {
+        // SAFETY: all values below are compile-time string/integer constants defined in
+        // constants.rs. The validation logic for each type accepts these values — if any
+        // constant is changed to an invalid value the test `test_swarm_config_default_is_valid`
+        // will catch it immediately.
         let valid_model_prefixes = vec!["gpt-", "deepseek-", "claude-", "openai-", "openrouter-"]
             .into_iter()
-            .map(|prefix| ModelPrefix::new(prefix).expect("default model prefixes are valid"))
+            .map(|prefix| {
+                ModelPrefix::new(prefix).expect("SAFETY: literal prefix is a non-empty string")
+            })
             .collect();
         let valid_api_url_prefixes = VALID_API_URL_PREFIXES
             .iter()
-            .map(|&prefix| ApiUrlPrefix::new(prefix).expect("default API URL prefixes are valid"))
+            .map(|&prefix| {
+                ApiUrlPrefix::new(prefix)
+                    .expect("SAFETY: literal URL prefix from VALID_API_URL_PREFIXES")
+            })
             .collect::<Vec<_>>();
 
         SwarmConfig {
             api_url: ApiUrl::new(OPENAI_DEFAULT_API_URL.to_string(), &valid_api_url_prefixes)
-                .expect("default API URL is valid"),
+                .expect("SAFETY: OPENAI_DEFAULT_API_URL is a well-formed URL in valid_api_url_prefixes"),
             api_version: DEFAULT_API_VERSION.to_string(),
             request_timeout: RequestTimeoutSeconds::new(DEFAULT_REQUEST_TIMEOUT)
-                .expect("default request timeout is valid"),
+                .expect("SAFETY: DEFAULT_REQUEST_TIMEOUT=30 is within [MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT]"),
             connect_timeout: ConnectTimeoutSeconds::new(DEFAULT_CONNECT_TIMEOUT)
-                .expect("default connect timeout is valid"),
-            max_retries: RetryLimit::new(3).expect("default retry limit is valid"),
+                .expect("SAFETY: DEFAULT_CONNECT_TIMEOUT=10 is a positive integer"),
+            max_retries: RetryLimit::new(3).expect("SAFETY: 3 > 0"),
             max_loop_iterations: LoopIterationLimit::new(DEFAULT_MAX_LOOP_ITERATIONS)
-                .expect("default loop iteration limit is valid"),
+                .expect("SAFETY: DEFAULT_MAX_LOOP_ITERATIONS=10 > 0"),
             valid_model_prefixes,
             valid_api_url_prefixes,
             loop_control: LoopControl::default(),
             api_settings: ApiSettings::default(),
+            runtime_limits: RuntimeLimits::default(),
         }
     }
 }
@@ -733,6 +926,14 @@ impl SwarmConfig {
         &self.api_settings
     }
 
+    pub fn runtime_limits(&self) -> &RuntimeLimits {
+        &self.runtime_limits
+    }
+
+    pub(crate) fn set_runtime_limits(&mut self, limits: RuntimeLimits) {
+        self.runtime_limits = limits;
+    }
+
     pub(crate) fn set_api_url(&mut self, api_url: impl Into<String>) -> SwarmResult<()> {
         self.api_url = ApiUrl::new(api_url, &self.valid_api_url_prefixes)?;
         Ok(())
@@ -752,29 +953,34 @@ impl SwarmConfig {
     pub(crate) fn set_request_timeout(&mut self, request_timeout: u64) -> SwarmResult<()> {
         let request_timeout = RequestTimeoutSeconds::new(request_timeout)?;
         self.request_timeout = request_timeout;
-        self.api_settings.timeout_settings.request_timeout =
-            Duration::from_secs(request_timeout.get());
+        self.api_settings
+            .timeout_settings_mut()
+            .set_request_timeout(Duration::from_secs(request_timeout.get()))?;
         Ok(())
     }
 
     pub(crate) fn set_connect_timeout(&mut self, connect_timeout: u64) -> SwarmResult<()> {
         let connect_timeout = ConnectTimeoutSeconds::new(connect_timeout)?;
         self.connect_timeout = connect_timeout;
-        self.api_settings.timeout_settings.connect_timeout =
-            Duration::from_secs(connect_timeout.get());
+        self.api_settings
+            .timeout_settings_mut()
+            .set_connect_timeout(Duration::from_secs(connect_timeout.get()))?;
         Ok(())
     }
 
     pub(crate) fn set_max_retries(&mut self, max_retries: u32) -> SwarmResult<()> {
         self.max_retries = RetryLimit::new(max_retries)?;
-        self.api_settings.retry_strategy.max_retries = max_retries;
+        self.api_settings
+            .retry_strategy_mut()
+            .set_max_retries(max_retries)?;
         Ok(())
     }
 
     pub(crate) fn set_max_loop_iterations(&mut self, max_loop_iterations: u32) -> SwarmResult<()> {
         let max_loop_iterations = LoopIterationLimit::new(max_loop_iterations)?;
         self.max_loop_iterations = max_loop_iterations;
-        self.loop_control.default_max_iterations = max_loop_iterations.get();
+        self.loop_control
+            .set_default_max_iterations(max_loop_iterations.get())?;
         Ok(())
     }
 
@@ -1103,9 +1309,9 @@ impl Message {
     }
 
     pub(crate) fn merge_function_call_delta(&mut self, delta: &Value) {
-        let function_call = self
-            .function_call
-            .get_or_insert_with(|| FunctionCall::from_parts_unchecked(String::new(), String::new()));
+        let function_call = self.function_call.get_or_insert_with(|| {
+            FunctionCall::from_parts_unchecked(String::new(), String::new())
+        });
         function_call.merge_delta(delta);
     }
 }
@@ -1123,11 +1329,84 @@ impl<'de> Deserialize<'de> for Message {
 /// The response from a chat completion request.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatCompletionResponse {
-    pub id: String,
-    pub object: String,
-    pub created: u64,
-    pub choices: Vec<Choice>,
-    pub usage: Option<Usage>,
+    id: String,
+    object: String,
+    created: u64,
+    choices: Vec<Choice>,
+    usage: Option<Usage>,
+}
+
+impl ChatCompletionResponse {
+    /// Empty accumulator used when streaming — chunks extend `choices` incrementally.
+    pub(crate) fn accumulator() -> Self {
+        Self {
+            id: String::new(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            choices: Vec::new(),
+            usage: None,
+        }
+    }
+
+    pub fn choices(&self) -> &[Choice] {
+        &self.choices
+    }
+
+    pub fn into_choices(self) -> Vec<Choice> {
+        self.choices
+    }
+
+    pub(crate) fn extend_choices(&mut self, new_choices: Vec<Choice>) {
+        self.choices.extend(new_choices);
+    }
+
+    pub fn usage(&self) -> Option<&Usage> {
+        self.usage.as_ref()
+    }
+}
+
+/// The reason the model stopped generating tokens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FinishReason {
+    Stop,
+    Length,
+    ContentFilter,
+    ToolCalls,
+    FunctionCall,
+    Unknown(String),
+}
+
+impl<'de> Deserialize<'de> for FinishReason {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "stop" => Self::Stop,
+            "length" => Self::Length,
+            "content_filter" => Self::ContentFilter,
+            "tool_calls" => Self::ToolCalls,
+            "function_call" => Self::FunctionCall,
+            other => Self::Unknown(other.to_string()),
+        })
+    }
+}
+
+impl Serialize for FinishReason {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::ContentFilter => "content_filter",
+            Self::ToolCalls => "tool_calls",
+            Self::FunctionCall => "function_call",
+            Self::Unknown(s) => s.as_str(),
+        })
+    }
 }
 
 /// A choice returned from the chat completion response.
@@ -1138,7 +1417,7 @@ pub struct ChatCompletionResponse {
 pub struct Choice {
     pub index: u32,
     pub message: Message,
-    pub finish_reason: Option<String>,
+    pub finish_reason: Option<FinishReason>,
 }
 
 impl<'de> Deserialize<'de> for Choice {
@@ -1155,8 +1434,10 @@ impl<'de> Deserialize<'de> for Choice {
 
         let finish_reason = value
             .get("finish_reason")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+            .filter(|v| !v.is_null())
+            .map(|v| serde_json::from_value::<FinishReason>(v.clone()))
+            .transpose()
+            .map_err(de::Error::custom)?;
 
         let message = if let Some(msg_val) = value.get("message") {
             serde_json::from_value(msg_val.clone()).map_err(de::Error::custom)?
@@ -1246,19 +1527,147 @@ pub struct Step {
 /// Strategy used for retrying failed API calls.
 #[derive(Clone, Debug)]
 pub struct RetryStrategy {
-    pub max_retries: u32,
-    pub initial_delay: Duration,
-    pub max_delay: Duration,
-    pub backoff_factor: f32,
+    max_retries: u32,
+    initial_delay: Duration,
+    max_delay: Duration,
+    backoff_factor: f32,
+}
+
+impl RetryStrategy {
+    pub fn new(
+        max_retries: u32,
+        initial_delay: Duration,
+        max_delay: Duration,
+        backoff_factor: f32,
+    ) -> SwarmResult<Self> {
+        if max_retries == 0 {
+            return Err(SwarmError::ValidationError(
+                "max_retries must be greater than 0".to_string(),
+            ));
+        }
+        if initial_delay.is_zero() {
+            return Err(SwarmError::ValidationError(
+                "initial_delay must be greater than zero".to_string(),
+            ));
+        }
+        if max_delay < initial_delay {
+            return Err(SwarmError::ValidationError(
+                "max_delay must be >= initial_delay".to_string(),
+            ));
+        }
+        if !backoff_factor.is_finite() || backoff_factor < 1.0 {
+            return Err(SwarmError::ValidationError(
+                "backoff_factor must be a finite number >= 1.0".to_string(),
+            ));
+        }
+        Ok(Self {
+            max_retries,
+            initial_delay,
+            max_delay,
+            backoff_factor,
+        })
+    }
+
+    pub fn max_retries(&self) -> u32 {
+        self.max_retries
+    }
+    pub fn initial_delay(&self) -> Duration {
+        self.initial_delay
+    }
+    pub fn max_delay(&self) -> Duration {
+        self.max_delay
+    }
+    pub fn backoff_factor(&self) -> f32 {
+        self.backoff_factor
+    }
+
+    pub(crate) fn set_max_retries(&mut self, value: u32) -> SwarmResult<()> {
+        if value == 0 {
+            return Err(SwarmError::ValidationError(
+                "max_retries must be greater than 0".to_string(),
+            ));
+        }
+        self.max_retries = value;
+        Ok(())
+    }
 }
 
 /// Timeout settings used for API calls.
 #[derive(Clone, Debug)]
 pub struct TimeoutSettings {
-    pub request_timeout: Duration,
-    pub connect_timeout: Duration,
-    pub read_timeout: Duration,
-    pub write_timeout: Duration,
+    request_timeout: Duration,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+    write_timeout: Duration,
+}
+
+impl TimeoutSettings {
+    pub fn new(
+        request_timeout: Duration,
+        connect_timeout: Duration,
+        read_timeout: Duration,
+        write_timeout: Duration,
+    ) -> SwarmResult<Self> {
+        if request_timeout.is_zero() {
+            return Err(SwarmError::ValidationError(
+                "request_timeout must be greater than zero".to_string(),
+            ));
+        }
+        if connect_timeout.is_zero() {
+            return Err(SwarmError::ValidationError(
+                "connect_timeout must be greater than zero".to_string(),
+            ));
+        }
+        if read_timeout.is_zero() {
+            return Err(SwarmError::ValidationError(
+                "read_timeout must be greater than zero".to_string(),
+            ));
+        }
+        if write_timeout.is_zero() {
+            return Err(SwarmError::ValidationError(
+                "write_timeout must be greater than zero".to_string(),
+            ));
+        }
+        Ok(Self {
+            request_timeout,
+            connect_timeout,
+            read_timeout,
+            write_timeout,
+        })
+    }
+
+    pub fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+    pub fn read_timeout(&self) -> Duration {
+        self.read_timeout
+    }
+    pub fn write_timeout(&self) -> Duration {
+        self.write_timeout
+    }
+
+    pub(crate) fn set_request_timeout(&mut self, value: Duration) -> SwarmResult<()> {
+        if value.is_zero() {
+            return Err(SwarmError::ValidationError(
+                "request_timeout must be greater than zero".to_string(),
+            ));
+        }
+        self.request_timeout = value;
+        Ok(())
+    }
+
+    pub(crate) fn set_connect_timeout(&mut self, value: Duration) -> SwarmResult<()> {
+        if value.is_zero() {
+            return Err(SwarmError::ValidationError(
+                "connect_timeout must be greater than zero".to_string(),
+            ));
+        }
+        self.connect_timeout = value;
+        Ok(())
+    }
 }
 
 /// Represents an error response from OpenAI.

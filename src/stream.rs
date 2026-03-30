@@ -4,9 +4,7 @@ use async_stream::try_stream;
 use futures_util::{stream::Stream, StreamExt};
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::env;
 
-use crate::constants::OPENAI_DEFAULT_API_URL;
 use crate::error::{SwarmError, SwarmResult};
 use crate::types::{Agent, ChatCompletionResponse, ContextVariables, Instructions, Message};
 use crate::util::{debug_print, function_to_json};
@@ -15,12 +13,17 @@ use crate::util::{debug_print, function_to_json};
 pub struct Streamer {
     client: Client,
     api_key: String,
+    api_url: String,
 }
 
 impl Streamer {
-    /// Create a new Streamer instance using the provided HTTP Client and API key.
-    pub fn new(client: Client, api_key: String) -> Self {
-        Self { client, api_key }
+    /// Create a new Streamer instance using the provided HTTP Client, API key, and API URL.
+    pub fn new(client: Client, api_key: String, api_url: String) -> Self {
+        Self {
+            client,
+            api_key,
+            api_url,
+        }
     }
 
     /// Begins a streaming chat completion request.
@@ -43,42 +46,42 @@ impl Streamer {
             Instructions::Function(_func) => agent.model.clone(),
         });
         debug_print(debug, &format!("stream called with debug={:?}", debug));
-        // Build the messages vector.
-        let mut messages = Vec::new();
+        let history_vec = history.to_vec();
         let system_instructions = match &agent.instructions {
             Instructions::Text(text) => text.clone(),
             Instructions::Function(func) => func(context_variables.clone()),
         };
-        messages.push(Message::system(system_instructions).unwrap());
-        messages.extend_from_slice(history);
+        // Pre-compute fallible values so ? can be used inside try_stream!
+        let functions_result: SwarmResult<Vec<Value>> =
+            agent.functions.iter().map(function_to_json).collect();
+        let function_call_json: Option<Value> =
+            agent.function_call().to_wire_value().map(|s| json!(s));
 
-        // Prepare any functions for the API.
-        let functions: Vec<Value> = agent
-            .functions
-            .iter()
-            .map(|func| function_to_json(func))
-            .collect::<SwarmResult<Vec<Value>>>()
-            .unwrap_or_default();
-
-        // Build the request payload.
-        let mut request_body = json!({
-            "model": model,
-            "messages": messages,
-            "stream": true,
-        });
-        if !functions.is_empty() {
-            request_body["functions"] = Value::Array(functions);
-        }
-        if let Some(function_call) = agent.function_call().to_wire_value() {
-            request_body["function_call"] = json!(function_call);
-        }
-
-        // Determine API URL from environment or default.
-        let api_url =
-            env::var("OPENAI_API_URL").unwrap_or_else(|_| OPENAI_DEFAULT_API_URL.to_string());
+        let api_url = self.api_url.clone();
 
         // Use try_stream to create a stream that can yield items and errors.
         try_stream! {
+            // Build messages, propagating any construction errors.
+            let system_msg = Message::system(system_instructions)?;
+            let mut messages = vec![system_msg];
+            messages.extend_from_slice(&history_vec);
+
+            // Build functions list, propagating serialization errors.
+            let functions = functions_result?;
+
+            // Build the request payload.
+            let mut request_body = json!({
+                "model": model,
+                "messages": messages,
+                "stream": true,
+            });
+            if !functions.is_empty() {
+                request_body["functions"] = Value::Array(functions);
+            }
+            if let Some(fc) = function_call_json {
+                request_body["function_call"] = fc;
+            }
+
             // Send POST request.
             let response = client
                 .post(api_url)
@@ -100,8 +103,8 @@ impl Streamer {
                         let text_chunk = String::from_utf8_lossy(&chunk);
                         // Each line is expected to be prefixed with "data: ".
                         for line in text_chunk.lines() {
-                            if line.starts_with("data: ") {
-                                let json_str = line[6..].trim();
+                            if let Some(stripped) = line.strip_prefix("data: ") {
+                                let json_str = stripped.trim();
                                 if json_str == "[DONE]" {
                                     break;
                                 }
@@ -109,7 +112,7 @@ impl Streamer {
                                 let partial: ChatCompletionResponse = serde_json::from_str(json_str)
                                     .map_err(|e| SwarmError::DeserializationError(e.to_string()))?;
                                 // Yield each message.
-                                for choice in partial.choices {
+                                for choice in partial.into_choices() {
                                     yield choice.message;
                                 }
                             }

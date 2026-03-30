@@ -54,21 +54,18 @@ mod tests {
 
     #[test]
     fn test_agent_with_functions() {
-        let test_function =
-            AgentFunction {
-                name: "test_function".to_string(),
-                function:
-                    Arc::new(
-                        |_: ContextVariables| -> Pin<
-                            Box<dyn Future<Output = Result<ResultType, anyhow::Error>> + Send>,
-                        > {
-                            Box::pin(
-                                async move { Ok(ResultType::Value("test result".to_string())) },
-                            )
-                        },
-                    ),
-                accepts_context_variables: false,
-            };
+        let test_function = AgentFunction::new(
+            "test_function",
+            Arc::new(
+                |_: ContextVariables| -> Pin<
+                    Box<dyn Future<Output = Result<ResultType, SwarmError>> + Send>,
+                > {
+                    Box::pin(async move { Ok(ResultType::Value("test result".to_string())) })
+                },
+            ),
+            false,
+        )
+        .expect("valid test function");
 
         let agent = text_agent("function_enabled_agent", "gpt-4", "Test with functions")
             .with_functions(vec![test_function])
@@ -76,8 +73,8 @@ mod tests {
             .with_tool_call_execution(ToolCallExecution::Parallel);
 
         assert_eq!(agent.functions().len(), 1);
-        assert_eq!(agent.functions()[0].name, "test_function");
-        assert!(!agent.functions()[0].accepts_context_variables);
+        assert_eq!(agent.functions()[0].name(), "test_function");
+        assert!(!agent.functions()[0].accepts_context_variables());
         assert_eq!(agent.function_call(), &FunctionCallPolicy::Auto);
         assert_eq!(agent.tool_call_execution(), ToolCallExecution::Parallel);
     }
@@ -100,7 +97,11 @@ mod tests {
 
     #[test]
     fn test_agent_empty_name() {
-        let result = Agent::new("", "gpt-4", Instructions::Text("Test instructions".to_string()));
+        let result = Agent::new(
+            "",
+            "gpt-4",
+            Instructions::Text("Test instructions".to_string()),
+        );
 
         // Verify error
         assert!(result.is_err());
@@ -114,7 +115,11 @@ mod tests {
 
     #[test]
     fn test_agent_empty_model() {
-        let result = Agent::new("test_agent", "", Instructions::Text("Test instructions".to_string()));
+        let result = Agent::new(
+            "test_agent",
+            "",
+            Instructions::Text("Test instructions".to_string()),
+        );
 
         // Verify error
         assert!(result.is_err());
@@ -177,7 +182,11 @@ mod tests {
 
     #[test]
     fn test_agent_with_empty_model() {
-        let result = Agent::new("test_agent", "", Instructions::Text("Test instructions".to_string()));
+        let result = Agent::new(
+            "test_agent",
+            "",
+            Instructions::Text("Test instructions".to_string()),
+        );
 
         assert!(matches!(result, Err(SwarmError::ValidationError(_))));
         if let Err(SwarmError::ValidationError(msg)) = result {

@@ -156,9 +156,9 @@ impl SwarmError {
     pub fn is_retriable(&self) -> bool {
         matches!(
             self,
-            SwarmError::NetworkError(_) |
-            SwarmError::TimeoutError(_) |
-            SwarmError::RateLimitError(_)
+            SwarmError::NetworkError(_)
+                | SwarmError::TimeoutError(_)
+                | SwarmError::RateLimitError(_)
         )
     }
 
@@ -181,9 +181,7 @@ impl SwarmError {
     pub fn is_configuration_error(&self) -> bool {
         matches!(
             self,
-            SwarmError::ConfigError(_) |
-            SwarmError::AuthError(_) |
-            SwarmError::EnvVarError(_)
+            SwarmError::ConfigError(_) | SwarmError::AuthError(_) | SwarmError::EnvVarError(_)
         )
     }
 }
@@ -191,12 +189,14 @@ impl SwarmError {
 /// Implement From for common error conversions
 impl From<anyhow::Error> for SwarmError {
     fn from(err: anyhow::Error) -> Self {
-        SwarmError::Other(err.to_string())
+        // Use {:#} to include the full error chain, not just the top-level message.
+        SwarmError::Other(format!("{:#}", err))
     }
 }
 
 impl From<std::io::Error> for SwarmError {
     fn from(err: std::io::Error) -> Self {
-        SwarmError::Other(err.to_string())
+        // Include error kind so callers can identify transient vs permanent IO errors.
+        SwarmError::Other(format!("IO error [{}]: {}", err.kind(), err))
     }
 }

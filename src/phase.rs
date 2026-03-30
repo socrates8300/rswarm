@@ -1,4 +1,4 @@
-use crate::error::SwarmResult;
+use crate::error::{SwarmError, SwarmResult};
 use crate::tool::{ToolCallSpec, ToolResult, ToolSchema};
 use crate::types::{ContextVariables, Message};
 use async_trait::async_trait;
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLoopPhase {
     Perceive {
@@ -45,11 +45,31 @@ impl fmt::Display for AgentLoopPhase {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlannedAction {
     pub tool: String,
     pub args: Value,
     pub rationale: String,
+}
+
+impl PlannedAction {
+    pub fn new(
+        tool: impl Into<String>,
+        args: Value,
+        rationale: impl Into<String>,
+    ) -> SwarmResult<Self> {
+        let tool = tool.into();
+        if tool.trim().is_empty() {
+            return Err(SwarmError::ValidationError(
+                "PlannedAction tool name cannot be empty".to_string(),
+            ));
+        }
+        Ok(Self {
+            tool,
+            args,
+            rationale: rationale.into(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -69,14 +89,14 @@ impl fmt::Display for TerminationReason {
             Self::TaskComplete => write!(f, "Task completed"),
             Self::MaxIterations => write!(f, "Max iterations reached"),
             Self::TokenBudgetExhausted => write!(f, "Token budget exhausted"),
-            Self::Error(msg) => write!(f, "Error: {}", msg),
+            Self::Error(msg) => write!(f, "Error: {}", crate::util::safe_truncate(msg, 200)),
             Self::ExplicitStop => write!(f, "Explicit stop"),
             Self::DoomLoopDetected => write!(f, "Doom loop detected"),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PhaseResult {
     Success {
@@ -100,7 +120,7 @@ pub enum PhaseResult {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -128,6 +148,22 @@ impl PhaseResult {
             phase,
             error,
             retryable,
+            duration_ms,
+            termination_reason: None,
+        }
+    }
+
+    /// Construct a `Failure` from a [`SwarmError`], preserving the typed source
+    /// as a formatted string while also using `is_retriable` to set `retryable`.
+    pub fn failure_with_source(
+        phase: AgentLoopPhase,
+        source: &SwarmError,
+        duration_ms: u64,
+    ) -> Self {
+        Self::Failure {
+            phase,
+            error: source.to_string(),
+            retryable: source.is_retriable(),
             duration_ms,
             termination_reason: None,
         }
@@ -189,17 +225,26 @@ impl fmt::Display for PhaseResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Success { phase, .. } => {
-                write!(f, "PhaseResult::Success {{ phase: {}, duration: {}ms }}", phase, self.duration_ms())
+                write!(
+                    f,
+                    "PhaseResult::Success {{ phase: {}, duration: {}ms }}",
+                    phase,
+                    self.duration_ms()
+                )
             }
             Self::Failure { phase, error, .. } => write!(
                 f,
                 "PhaseResult::Failure {{ phase: {}, duration: {}ms, error: {} }}",
                 phase,
                 self.duration_ms(),
-                error
+                crate::util::safe_truncate(error, 200)
             ),
             Self::Skipped { phase, reason, .. } => {
-                write!(f, "PhaseResult::Skipped {{ phase: {}, reason: {} }}", phase, reason)
+                write!(
+                    f,
+                    "PhaseResult::Skipped {{ phase: {}, reason: {} }}",
+                    phase, reason
+                )
             }
         }
     }

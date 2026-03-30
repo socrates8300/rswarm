@@ -1,0 +1,174 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "9.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" }
+  ],
+  "annotations": { "list": [] },
+  "description": "rswarm agent framework — core operational metrics",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+
+    {
+      "id": 1,
+      "title": "Agent Iterations / s",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(rswarm_iteration_total[1m])) by (agent)",
+          "legendFormat": "{{ agent }}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "color": { "mode": "palette-classic" } }
+      }
+    },
+
+    {
+      "id": 2,
+      "title": "Token Usage Rate (tokens/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(rswarm_token_usage_total[1m])) by (model)",
+          "legendFormat": "{{ model }}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }
+      }
+    },
+
+    {
+      "id": 3,
+      "title": "LLM Latency (P50 / P95 / P99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(rswarm_llm_latency_ms_bucket[5m])) by (model, le))",
+          "legendFormat": "p50 {{ model }}", "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(rswarm_llm_latency_ms_bucket[5m])) by (model, le))",
+          "legendFormat": "p95 {{ model }}", "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(rswarm_llm_latency_ms_bucket[5m])) by (model, le))",
+          "legendFormat": "p99 {{ model }}", "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "color": { "mode": "palette-classic" } }
+      }
+    },
+
+    {
+      "id": 4,
+      "title": "Tool Latency P95 by Tool",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(rswarm_tool_latency_ms_bucket[5m])) by (tool, le))",
+          "legendFormat": "{{ tool }}", "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" }
+      }
+    },
+
+    {
+      "id": 5,
+      "title": "Tool Error Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum(rate(rswarm_tool_outcome_total{outcome=\"err\"}[5m])) by (tool) / sum(rate(rswarm_tool_outcome_total[5m])) by (tool)",
+          "legendFormat": "{{ tool }}", "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 }
+      }
+    },
+
+    {
+      "id": 6,
+      "title": "Circuit Breaker State Changes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "increase(rswarm_circuit_breaker_state_total[5m])",
+          "legendFormat": "{{ breaker }} → {{ state }}", "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }
+      }
+    },
+
+    {
+      "id": 7,
+      "title": "Guardrail Triggers / min",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "sum(rate(rswarm_guardrail_triggered_total[1m])) by (type) * 60",
+          "legendFormat": "{{ type }}", "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+
+    {
+      "id": 8,
+      "title": "Budget Exhaustion Events",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "expr": "sum(increase(rswarm_budget_exhausted_total[1h])) by (limit_type)",
+          "legendFormat": "{{ limit_type }}", "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      }
+    }
+
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["rswarm", "agents", "llm"],
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "rswarm — Agent Overview",
+  "uid": "rswarm-overview-v1",
+  "version": 1
+}

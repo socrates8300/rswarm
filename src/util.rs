@@ -4,10 +4,13 @@ use crate::error::{SwarmError, SwarmResult};
 ///
 /// This module provides various helper functions for debugging, message handling,
 /// XML processing, and function conversion utilities.
-use crate::types::{AgentFunction, Message, Steps};
+use crate::types::{AgentFunction, Message, RetryStrategy, Steps};
 use quick_xml::de::from_str as xml_from_str;
 use regex::Regex;
 use serde_json::{json, Value};
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
 
 /// Prints debug messages when debug mode is enabled
 ///
@@ -21,7 +24,7 @@ use serde_json::{json, Value};
 ///
 pub fn debug_print(debug: bool, message: &str) {
     if debug {
-        println!("[DEBUG]: {}", message);
+        tracing::debug!("{}", message);
     }
 }
 
@@ -71,16 +74,10 @@ pub fn merge_chunk_message(message: &mut Message, delta: &serde_json::Map<String
 ///
 ///
 pub fn function_to_json(func: &AgentFunction) -> SwarmResult<Value> {
-    let parameters = json!({
-        "type": "object",
-        "properties": {},
-        "required": [],
-    });
-
     Ok(json!({
-        "name": func.name,
-        "description": "",
-        "parameters": parameters,
+        "name": func.name(),
+        "description": func.description(),
+        "parameters": func.parameters_schema(),
     }))
 }
 
@@ -107,8 +104,17 @@ pub fn function_to_json(func: &AgentFunction) -> SwarmResult<Value> {
 /// # Examples
 ///
 pub fn parse_steps_from_xml(xml_content: &str) -> SwarmResult<Steps> {
-    xml_from_str(xml_content)
-        .map_err(|e| SwarmError::XmlError(format!("Failed to parse XML steps: {}", e)))
+    let steps: Steps = xml_from_str(xml_content)
+        .map_err(|e| SwarmError::XmlError(format!("Failed to parse XML steps: {}", e)))?;
+    for step in &steps.steps {
+        if step.prompt.trim().is_empty() {
+            return Err(SwarmError::ValidationError(format!(
+                "Step {} has an empty prompt",
+                step.number
+            )));
+        }
+    }
+    Ok(steps)
 }
 
 /// Extracts XML step definitions from instructions text
@@ -141,11 +147,60 @@ pub fn extract_xml_steps(instructions: &str) -> SwarmResult<(String, Option<Stri
     let re = Regex::new(r"(?s)<steps\b[^>]*>.*?</steps>")
         .map_err(|e| SwarmError::Other(format!("Invalid regex pattern: {}", e)))?;
 
-    if let Some(mat) = re.find(&instructions) {
+    if let Some(mat) = re.find(instructions) {
         let xml_content = mat.as_str();
         instructions_without_xml.replace_range(mat.range(), "");
         xml_steps = Some(xml_content.to_string());
     }
 
     Ok((instructions_without_xml.trim().to_string(), xml_steps))
+}
+
+/// Truncates a string to at most `max_len` chars, appending "…" if truncated.
+///
+/// Used in Display impls to prevent accidental leakage of API keys, tokens,
+/// or PII from error messages into logs.
+pub fn safe_truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max_len])
+    }
+}
+
+/// Retries an async operation according to the given [`RetryStrategy`].
+///
+/// Only retries when [`SwarmError::is_retriable`] returns `true`. Uses
+/// exponential backoff capped at `strategy.max_delay`.
+///
+/// # Example
+/// ```rust,ignore
+/// let result = with_retry(&config.api_settings.retry_strategy, || {
+///     Box::pin(client.call())
+/// }).await?;
+/// ```
+pub async fn with_retry<F, T>(strategy: &RetryStrategy, mut f: F) -> SwarmResult<T>
+where
+    F: FnMut() -> Pin<Box<dyn Future<Output = SwarmResult<T>> + 'static>>,
+{
+    let mut delay = strategy.initial_delay();
+    for attempt in 0..=strategy.max_retries() {
+        match f().await {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt < strategy.max_retries() && err.is_retriable() => {
+                tracing::warn!(
+                    "Retryable error on attempt {}/{}, retrying in {}ms: {}",
+                    attempt + 1,
+                    strategy.max_retries(),
+                    delay.as_millis(),
+                    err
+                );
+                tokio::time::sleep(delay).await;
+                let next_ms = (delay.as_millis() as f64 * strategy.backoff_factor() as f64) as u64;
+                delay = Duration::from_millis(next_ms.min(strategy.max_delay().as_millis() as u64));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(SwarmError::Other("Retry attempts exhausted".to_string()))
 }

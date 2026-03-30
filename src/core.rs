@@ -6,29 +6,113 @@
    calls are now asynchronous and are awaited without blocking the runtime.
 */
 
+use crate::checkpoint::{CheckpointData, CheckpointEnvelope};
+use crate::circuit_breaker::{CircuitBreaker, CircuitStateSnapshot};
 use crate::constants::{CTX_VARS_NAME, MAX_REQUEST_TIMEOUT, MIN_REQUEST_TIMEOUT};
 use crate::error::{SwarmError, SwarmResult};
-use crate::event::{AgentEvent, EventSubscriber};
+use crate::escalation::{
+    EscalationAction, EscalationConfig, EscalationDetector, EscalationTrigger,
+};
+use crate::event::{AgentEvent, EventSubscriber, TraceId};
+use crate::guardrails::{
+    check_injection_with_policy, classify_and_redact, ContentPolicy, DataClassification,
+    DefaultContentPolicy, InjectionOutcome, InjectionPolicy, PolicyResult, RedactionPolicy,
+};
+use crate::observability::{
+    record_budget_exhausted, record_circuit_breaker_state, record_guardrail_triggered,
+    record_iteration, record_llm_latency, record_token_usage, record_tool_call,
+};
+use crate::persistence::{
+    CheckpointStore, EventStore, MemoryStore, PersistenceBackend, SessionStore,
+};
+use crate::phase::TokenUsage;
 use crate::provider::{CompletionRequest, LlmProvider, OpenAiProvider};
 use crate::tool::InvocationArgs;
 use crate::types::{
     Agent, AgentFunction, ApiKey, ApiUrl, ChatCompletionResponse, ContextVariables, FunctionCall,
-    FunctionCallPolicy, Instructions, Message, ModelId, OpenAIErrorResponse, Response,
-    ResultType, Step, Steps, SwarmConfig,
+    FunctionCallPolicy, Instructions, Message, ModelId, OpenAIErrorResponse, Response, ResultType,
+    RuntimeLimits, Step, Steps, SwarmConfig,
 };
 use crate::util::{debug_print, extract_xml_steps, function_to_json, parse_steps_from_xml};
-use crate::validation::validate_api_request;
+use crate::validation::{
+    validate_api_request, verify_structured_response, BudgetEnforcer, BudgetExhausted,
+};
 use chrono::Utc;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+#[derive(Clone, Debug)]
+struct CircuitBreakerSettings {
+    failure_threshold: u32,
+    reset_secs: u64,
+}
+
+impl CircuitBreakerSettings {
+    fn validate(&self, label: &str) -> SwarmResult<()> {
+        if self.failure_threshold == 0 {
+            return Err(SwarmError::ValidationError(format!(
+                "{} failure_threshold must be greater than 0",
+                label
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Default for CircuitBreakerSettings {
+    fn default() -> Self {
+        Self {
+            failure_threshold: 3,
+            reset_secs: 30,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RunOptions {
+    model_override: Option<String>,
+    stream: bool,
+    debug: bool,
+    max_turns: usize,
+}
+
+struct RunState {
+    agent: Agent,
+    history: Vec<Message>,
+    context_variables: ContextVariables,
+    iterations: u32,
+    total_tokens: u32,
+}
+
+struct ExecutionContext<'a> {
+    trace_id: &'a TraceId,
+    options: &'a RunOptions,
+    budget: &'a mut BudgetEnforcer,
+    escalation: &'a mut EscalationDetector,
+}
+
+fn max_classification(
+    current: Option<DataClassification>,
+    candidate: Option<DataClassification>,
+) -> Option<DataClassification> {
+    match (current, candidate) {
+        (Some(current), Some(candidate)) => Some(std::cmp::max(current, candidate)),
+        (Some(current), None) => Some(current),
+        (None, Some(candidate)) => Some(candidate),
+        (None, None) => None,
+    }
+}
 
 impl Default for Swarm {
     fn default() -> Self {
+        // SAFETY: None/empty arguments use only hardcoded default constants that are
+        // proven valid by SwarmConfig::default(). This can only fail if OPENAI_API_KEY
+        // is unset, in which case the panic is intentional and gives a clear message.
         Swarm::new(None, None, HashMap::new()).expect("Default initialization should never fail")
     }
 }
@@ -41,6 +125,20 @@ pub struct Swarm {
     config: SwarmConfig,
     provider: Arc<dyn LlmProvider>,
     subscribers: Vec<Arc<dyn EventSubscriber>>,
+    session_store: Option<Arc<dyn SessionStore>>,
+    event_store: Option<Arc<dyn EventStore>>,
+    /// Optional durable checkpoint store (task #32/#33).
+    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    /// Optional durable memory store (task #38).
+    memory_store: Option<Arc<dyn MemoryStore>>,
+    content_policy: Arc<dyn ContentPolicy>,
+    injection_policy: InjectionPolicy,
+    redaction_policy: RedactionPolicy,
+    redaction_threshold: DataClassification,
+    escalation_config: EscalationConfig,
+    provider_breaker: CircuitBreaker,
+    tool_breaker_settings: CircuitBreakerSettings,
+    tool_breakers: Arc<Mutex<HashMap<String, CircuitBreaker>>>,
 }
 
 /// Builder pattern implementation for creating Swarm instances.
@@ -51,6 +149,17 @@ pub struct SwarmBuilder {
     config: SwarmConfig,
     build_error: Option<SwarmError>,
     subscribers: Vec<Arc<dyn EventSubscriber>>,
+    session_store: Option<Arc<dyn SessionStore>>,
+    event_store: Option<Arc<dyn EventStore>>,
+    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    memory_store: Option<Arc<dyn MemoryStore>>,
+    content_policy: Arc<dyn ContentPolicy>,
+    injection_policy: InjectionPolicy,
+    redaction_policy: RedactionPolicy,
+    redaction_threshold: DataClassification,
+    escalation_config: EscalationConfig,
+    provider_breaker_settings: CircuitBreakerSettings,
+    tool_breaker_settings: CircuitBreakerSettings,
 }
 
 impl SwarmBuilder {
@@ -63,6 +172,17 @@ impl SwarmBuilder {
             config,
             build_error: None,
             subscribers: Vec::new(),
+            session_store: None,
+            event_store: None,
+            checkpoint_store: None,
+            memory_store: None,
+            content_policy: Arc::new(DefaultContentPolicy),
+            injection_policy: InjectionPolicy::default(),
+            redaction_policy: RedactionPolicy::Redact,
+            redaction_threshold: DataClassification::Sensitive,
+            escalation_config: EscalationConfig::default(),
+            provider_breaker_settings: CircuitBreakerSettings::default(),
+            tool_breaker_settings: CircuitBreakerSettings::default(),
         }
     }
 
@@ -118,6 +238,11 @@ impl SwarmBuilder {
         self
     }
 
+    pub fn with_runtime_limits(mut self, limits: RuntimeLimits) -> Self {
+        self.config.set_runtime_limits(limits);
+        self
+    }
+
     pub fn with_valid_model_prefixes(mut self, prefixes: Vec<String>) -> Self {
         if let Err(err) = self.config.set_valid_model_prefixes(prefixes) {
             self.record_error(err);
@@ -129,6 +254,38 @@ impl SwarmBuilder {
         if let Err(err) = self.config.set_valid_api_url_prefixes(prefixes) {
             self.record_error(err);
         }
+        self
+    }
+
+    pub fn with_checkpoint_store(mut self, store: Arc<dyn CheckpointStore>) -> Self {
+        self.checkpoint_store = Some(store);
+        self
+    }
+
+    pub fn with_session_store(mut self, store: Arc<dyn SessionStore>) -> Self {
+        self.session_store = Some(store);
+        self
+    }
+
+    pub fn with_event_store(mut self, store: Arc<dyn EventStore>) -> Self {
+        self.event_store = Some(store);
+        self
+    }
+
+    pub fn with_memory_store(mut self, store: Arc<dyn MemoryStore>) -> Self {
+        self.memory_store = Some(store);
+        self
+    }
+
+    pub fn with_persistence_backend<T>(mut self, backend: T) -> Self
+    where
+        T: PersistenceBackend + 'static,
+    {
+        let backend = Arc::new(backend);
+        self.session_store = Some(backend.clone());
+        self.event_store = Some(backend.clone());
+        self.checkpoint_store = Some(backend.clone());
+        self.memory_store = Some(backend);
         self
     }
 
@@ -157,6 +314,51 @@ impl SwarmBuilder {
         self
     }
 
+    pub fn with_content_policy(mut self, policy: Arc<dyn ContentPolicy>) -> Self {
+        self.content_policy = policy;
+        self
+    }
+
+    pub fn with_injection_policy(mut self, policy: InjectionPolicy) -> Self {
+        self.injection_policy = policy;
+        self
+    }
+
+    pub fn with_redaction_policy(mut self, policy: RedactionPolicy) -> Self {
+        self.redaction_policy = policy;
+        self
+    }
+
+    pub fn with_redaction_threshold(mut self, threshold: DataClassification) -> Self {
+        self.redaction_threshold = threshold;
+        self
+    }
+
+    pub fn with_escalation_config(mut self, config: EscalationConfig) -> Self {
+        self.escalation_config = config;
+        self
+    }
+
+    pub fn with_provider_circuit_breaker(
+        mut self,
+        failure_threshold: u32,
+        reset_secs: u64,
+    ) -> Self {
+        self.provider_breaker_settings = CircuitBreakerSettings {
+            failure_threshold,
+            reset_secs,
+        };
+        self
+    }
+
+    pub fn with_tool_circuit_breaker(mut self, failure_threshold: u32, reset_secs: u64) -> Self {
+        self.tool_breaker_settings = CircuitBreakerSettings {
+            failure_threshold,
+            reset_secs,
+        };
+        self
+    }
+
     pub fn build(self) -> SwarmResult<Swarm> {
         if let Some(err) = self.build_error {
             return Err(err);
@@ -168,19 +370,22 @@ impl SwarmBuilder {
             agent.validate(&self.config)?;
         }
 
+        self.provider_breaker_settings
+            .validate("provider circuit breaker")?;
+        self.tool_breaker_settings
+            .validate("tool circuit breaker")?;
+
         let api_key = match self.api_key {
             Some(key) => key,
-            None => {
-                match env::var("OPENAI_API_KEY") {
-                    Ok(key) => ApiKey::new(key)?,
-                    Err(_) => {
-                        return Err(SwarmError::ValidationError(
-                            "API key must be set either in environment or passed to builder"
-                                .to_string(),
-                        ))
-                    }
+            None => match env::var("OPENAI_API_KEY") {
+                Ok(key) => ApiKey::new(key)?,
+                Err(_) => {
+                    return Err(SwarmError::ValidationError(
+                        "API key must be set either in environment or passed to builder"
+                            .to_string(),
+                    ))
                 }
-            }
+            },
         };
 
         let client = self.client.unwrap_or_else(|| {
@@ -188,7 +393,14 @@ impl SwarmBuilder {
                 .timeout(Duration::from_secs(self.config.request_timeout()))
                 .connect_timeout(Duration::from_secs(self.config.connect_timeout()))
                 .build()
-                .unwrap_or_else(|_| Client::new())
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to build configured HTTP client ({}), falling back to default — \
+                         request/connect timeouts will not be applied",
+                        e
+                    );
+                    Client::new()
+                })
         });
 
         let provider: Arc<dyn LlmProvider> = Arc::new(OpenAiProvider::new(
@@ -204,6 +416,22 @@ impl SwarmBuilder {
             config: self.config,
             provider,
             subscribers: self.subscribers,
+            session_store: self.session_store,
+            event_store: self.event_store,
+            checkpoint_store: self.checkpoint_store,
+            memory_store: self.memory_store,
+            content_policy: self.content_policy,
+            injection_policy: self.injection_policy,
+            redaction_policy: self.redaction_policy,
+            redaction_threshold: self.redaction_threshold,
+            escalation_config: self.escalation_config,
+            provider_breaker: CircuitBreaker::new(
+                "provider",
+                self.provider_breaker_settings.failure_threshold,
+                self.provider_breaker_settings.reset_secs,
+            ),
+            tool_breaker_settings: self.tool_breaker_settings,
+            tool_breakers: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -212,13 +440,11 @@ impl SwarmBuilder {
             self.build_error = Some(err);
         }
     }
+}
 
-    fn _validate(&self) -> SwarmResult<()> {
-        if let Some(err) = &self.build_error {
-            return Err(SwarmError::Other(err.to_string()));
-        }
-        self.config.validate()?;
-        Ok(())
+impl Default for SwarmBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -268,9 +494,318 @@ impl Swarm {
 
     /// Emit an event to all registered subscribers.
     async fn emit(&self, event: AgentEvent) {
+        if let Some(store) = &self.event_store {
+            if let Err(err) = store.append_event(event.trace_id(), &event).await {
+                tracing::warn!(
+                    trace_id = event.trace_id(),
+                    "event persistence failed (non-fatal): {}",
+                    err
+                );
+            }
+        }
         for sub in &self.subscribers {
             sub.on_event(&event).await;
         }
+    }
+
+    fn sanitize_text(&self, text: &str) -> (DataClassification, String) {
+        classify_and_redact(
+            text,
+            &self.redaction_policy,
+            self.redaction_threshold.clone(),
+        )
+    }
+
+    fn sanitize_json_value(&self, value: &Value) -> (Option<DataClassification>, Value) {
+        match value {
+            Value::String(text) => {
+                let (classification, redacted) = self.sanitize_text(text);
+                let classification = match classification {
+                    DataClassification::Public => None,
+                    other => Some(other),
+                };
+                (classification, Value::String(redacted))
+            }
+            Value::Array(items) => {
+                let mut highest = None;
+                let mut sanitized = Vec::with_capacity(items.len());
+                for item in items {
+                    let (classification, value) = self.sanitize_json_value(item);
+                    highest = max_classification(highest, classification);
+                    sanitized.push(value);
+                }
+                (highest, Value::Array(sanitized))
+            }
+            Value::Object(map) => {
+                let mut highest = None;
+                let mut sanitized = serde_json::Map::with_capacity(map.len());
+                for (key, item) in map {
+                    let (classification, value) = self.sanitize_json_value(item);
+                    highest = max_classification(highest, classification);
+                    sanitized.insert(key.clone(), value);
+                }
+                (highest, Value::Object(sanitized))
+            }
+            _ => (None, value.clone()),
+        }
+    }
+
+    fn get_tool_breaker(&self, tool_name: &str) -> CircuitBreaker {
+        let mut guard = self
+            .tool_breakers
+            .lock()
+            .expect("tool_breakers lock poisoned");
+        guard
+            .entry(tool_name.to_string())
+            .or_insert_with(|| {
+                CircuitBreaker::new(
+                    format!("tool:{}", tool_name),
+                    self.tool_breaker_settings.failure_threshold,
+                    self.tool_breaker_settings.reset_secs,
+                )
+            })
+            .clone()
+    }
+
+    async fn emit_guardrail_event(
+        &self,
+        trace_id: &TraceId,
+        guardrail_type: &str,
+        action: &str,
+        details: &str,
+        classification: Option<DataClassification>,
+    ) {
+        let (_, details) = self.sanitize_text(details);
+        record_guardrail_triggered(guardrail_type);
+        self.emit(AgentEvent::GuardrailTriggered {
+            trace_id: trace_id.clone(),
+            guardrail_type: guardrail_type.to_string(),
+            action: action.to_string(),
+            details,
+            classification,
+            timestamp: Utc::now(),
+        })
+        .await;
+    }
+
+    async fn emit_budget_event(&self, trace_id: &TraceId, exhausted: &BudgetExhausted) {
+        let limit_type = match exhausted {
+            BudgetExhausted::TokenBudget { .. } => "token_budget",
+            BudgetExhausted::TokensPerRequest { .. } => "tokens_per_request",
+            BudgetExhausted::WallTime { .. } => "wall_time",
+            BudgetExhausted::ToolCallQuota { .. } => "tool_call_quota",
+            BudgetExhausted::MaxDepth { .. } => "max_depth",
+        };
+        record_budget_exhausted(limit_type);
+        self.emit(AgentEvent::BudgetExceeded {
+            trace_id: trace_id.clone(),
+            limit_type: limit_type.to_string(),
+            details: exhausted.to_string(),
+            timestamp: Utc::now(),
+        })
+        .await;
+    }
+
+    async fn emit_breaker_event(
+        &self,
+        trace_id: &TraceId,
+        breaker: &CircuitBreaker,
+        state: CircuitStateSnapshot,
+        reason: Option<String>,
+    ) {
+        record_circuit_breaker_state(breaker.name(), &state.to_string());
+        self.emit(AgentEvent::CircuitBreakerStateChanged {
+            trace_id: trace_id.clone(),
+            breaker_name: breaker.name().to_string(),
+            state,
+            reason,
+            timestamp: Utc::now(),
+        })
+        .await;
+    }
+
+    async fn emit_escalation_event(
+        &self,
+        trace_id: &TraceId,
+        trigger: EscalationTrigger,
+        action: EscalationAction,
+    ) {
+        self.emit(AgentEvent::EscalationTriggered {
+            trace_id: trace_id.clone(),
+            trigger,
+            action,
+            timestamp: Utc::now(),
+        })
+        .await;
+    }
+
+    async fn create_session_if_configured(&self, trace_id: &TraceId, agent_name: &str) {
+        let Some(store) = &self.session_store else {
+            return;
+        };
+        if let Err(err) = store
+            .create_session(trace_id.as_str(), agent_name, trace_id.as_str())
+            .await
+        {
+            tracing::warn!(
+                session_id = trace_id.as_str(),
+                "session creation failed (non-fatal): {}",
+                err
+            );
+        }
+    }
+
+    async fn store_messages_if_configured(&self, trace_id: &TraceId, messages: &[Message]) {
+        let Some(store) = &self.session_store else {
+            return;
+        };
+        if let Err(err) = store.store_messages(trace_id.as_str(), messages).await {
+            tracing::warn!(
+                session_id = trace_id.as_str(),
+                "message persistence failed (non-fatal): {}",
+                err
+            );
+        }
+    }
+
+    async fn complete_session_if_configured(&self, trace_id: &TraceId, outcome: &str) {
+        let Some(store) = &self.session_store else {
+            return;
+        };
+        if let Err(err) = store.complete_session(trace_id.as_str(), outcome).await {
+            tracing::warn!(
+                session_id = trace_id.as_str(),
+                "session completion failed (non-fatal): {}",
+                err
+            );
+        }
+    }
+
+    async fn persist_memory_hook(&self, trace_id: &TraceId, key: &str, value: &str, source: &str) {
+        let Some(store) = &self.memory_store else {
+            return;
+        };
+        let (classification, sanitized) = self.sanitize_text(value);
+        if let Err(err) = store
+            .persist_memory(trace_id.as_str(), key, &sanitized)
+            .await
+        {
+            tracing::warn!(
+                session_id = trace_id.as_str(),
+                memory_key = key,
+                "memory persistence failed (non-fatal): {}",
+                err
+            );
+            return;
+        }
+        self.emit(AgentEvent::MemoryPersisted {
+            trace_id: trace_id.clone(),
+            key: key.to_string(),
+            source: source.to_string(),
+            classification,
+            timestamp: Utc::now(),
+        })
+        .await;
+    }
+
+    async fn enforce_content_policy(
+        &self,
+        trace_id: &TraceId,
+        text: &str,
+        context: &str,
+    ) -> SwarmResult<()> {
+        match self.content_policy.check_text(text, context).await {
+            PolicyResult::Allow => Ok(()),
+            PolicyResult::Warn(message) => {
+                self.emit_guardrail_event(
+                    trace_id,
+                    "content_policy",
+                    "warn",
+                    &message,
+                    Some(DataClassification::Restricted),
+                )
+                .await;
+                Ok(())
+            }
+            PolicyResult::Block(message) => {
+                self.emit_guardrail_event(
+                    trace_id,
+                    "content_policy",
+                    "block",
+                    &message,
+                    Some(DataClassification::Restricted),
+                )
+                .await;
+                Err(SwarmError::Other(message))
+            }
+        }
+    }
+
+    async fn apply_injection_policy(
+        &self,
+        trace_id: &TraceId,
+        messages: &mut [Message],
+    ) -> SwarmResult<()> {
+        for message in messages.iter_mut() {
+            let Some(content) = message.content().map(str::to_string) else {
+                continue;
+            };
+            match check_injection_with_policy(&content, &self.injection_policy) {
+                InjectionOutcome::Clean => {}
+                InjectionOutcome::Warned { patterns } => {
+                    self.emit_guardrail_event(
+                        trace_id,
+                        "prompt_injection",
+                        "warn",
+                        &format!("patterns={:?}", patterns),
+                        Some(DataClassification::Restricted),
+                    )
+                    .await;
+                }
+                InjectionOutcome::Sanitized {
+                    patterns,
+                    sanitized,
+                } => {
+                    self.emit_guardrail_event(
+                        trace_id,
+                        "prompt_injection",
+                        "sanitize",
+                        &format!("patterns={:?}", patterns),
+                        Some(DataClassification::Restricted),
+                    )
+                    .await;
+                    *message = Message::from_parts_unchecked(
+                        message.role(),
+                        Some(sanitized),
+                        message.name().map(str::to_string),
+                        message.function_call().cloned(),
+                    );
+                }
+                InjectionOutcome::Rejected { patterns } => {
+                    self.emit_guardrail_event(
+                        trace_id,
+                        "prompt_injection",
+                        "reject",
+                        &format!("patterns={:?}", patterns),
+                        Some(DataClassification::Restricted),
+                    )
+                    .await;
+                    return Err(SwarmError::ValidationError(format!(
+                        "Prompt injection rejected by policy: {:?}",
+                        patterns
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn check_budget(&self, trace_id: &TraceId, budget: &BudgetEnforcer) -> SwarmResult<()> {
+        if let Err(exhausted) = budget.check() {
+            self.emit_budget_event(trace_id, &exhausted).await;
+            return Err(exhausted.into());
+        }
+        Ok(())
     }
 
     /// Makes an asynchronous chat completion request.
@@ -358,28 +893,22 @@ impl Swarm {
             }
 
             let mut stream = response.bytes_stream();
-            let mut full_response = ChatCompletionResponse {
-                id: "".to_string(),
-                object: "chat.completion".to_string(),
-                created: 0,
-                choices: Vec::new(),
-                usage: None,
-            };
+            let mut full_response = ChatCompletionResponse::accumulator();
 
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(data) => {
                         let text = String::from_utf8_lossy(&data);
                         for line in text.lines() {
-                            if line.starts_with("data: ") {
-                                let json_str = line[6..].trim();
+                            if let Some(stripped) = line.strip_prefix("data: ") {
+                                let json_str = stripped.trim();
                                 if json_str == "[DONE]" {
                                     break;
                                 }
                                 let partial_response: serde_json::Result<ChatCompletionResponse> =
                                     serde_json::from_str(json_str);
                                 if let Ok(partial) = partial_response {
-                                    full_response.choices.extend(partial.choices);
+                                    full_response.extend_choices(partial.into_choices());
                                 }
                             }
                         }
@@ -408,7 +937,10 @@ impl Swarm {
             }
 
             let provider_response = self.provider.complete(request).await?;
-            debug_print(debug, &format!("Provider Response: {:?}", provider_response));
+            debug_print(
+                debug,
+                &format!("Provider Response: {:?}", provider_response),
+            );
 
             let mut json_val = serde_json::to_value(&provider_response).map_err(|e| {
                 SwarmError::DeserializationError(format!(
@@ -427,9 +959,7 @@ impl Swarm {
                             let args_str = if args.is_string() {
                                 args.clone()
                             } else {
-                                Value::String(
-                                    serde_json::to_string(&args).unwrap_or_default(),
-                                )
+                                Value::String(serde_json::to_string(&args).unwrap_or_default())
                             };
                             choice["message"]["function_call"] =
                                 json!({"name": name, "arguments": args_str});
@@ -462,7 +992,7 @@ impl Swarm {
 
         let mut function_map = HashMap::new();
         for func in functions {
-            function_map.insert(func.name.clone(), func.clone());
+            function_map.insert(func.name().to_string(), func.clone());
         }
 
         let mut response = Response {
@@ -475,6 +1005,9 @@ impl Swarm {
 
         if let Some(func) = function_map.get(function_call.name()) {
             let invocation_args = InvocationArgs::from_json_str(function_call.arguments())
+                .map_err(|error| SwarmError::ValidationError(error.to_string()))?;
+            invocation_args
+                .validate_against_schema(func.parameters_schema())
                 .map_err(|error| SwarmError::ValidationError(error.to_string()))?;
             let args: ContextVariables = invocation_args
                 .to_context_variables()
@@ -489,7 +1022,7 @@ impl Swarm {
             );
 
             let mut args = args.clone();
-            if func.accepts_context_variables {
+            if func.accepts_context_variables() {
                 let serialized_context = serde_json::to_string(&context_variables)?;
                 args.insert(CTX_VARS_NAME.to_string(), serialized_context);
             }
@@ -534,129 +1067,458 @@ impl Swarm {
         Ok(result)
     }
 
+    async fn persist_iteration_state(&self, trace_id: &TraceId, state: &RunState) {
+        self.store_messages_if_configured(trace_id, &state.history)
+            .await;
+        self.save_checkpoint_if_configured(
+            trace_id.as_str(),
+            state.agent.name(),
+            &state.history,
+            &state.context_variables,
+            state.iterations,
+            state.total_tokens,
+        )
+        .await;
+    }
+
+    async fn apply_escalation_trigger(
+        &self,
+        state: &mut RunState,
+        exec: &mut ExecutionContext<'_>,
+        trigger: EscalationTrigger,
+    ) -> SwarmResult<Option<crate::phase::TerminationReason>> {
+        let action = exec.escalation.config().action.clone();
+        self.emit_escalation_event(exec.trace_id, trigger.clone(), action.clone())
+            .await;
+        match action {
+            EscalationAction::Stop => Ok(Some(crate::phase::TerminationReason::DoomLoopDetected)),
+            EscalationAction::InjectWarning => {
+                let warning = EscalationDetector::warning_message(&trigger);
+                state.history.push(Message::assistant(warning.clone())?);
+                self.persist_memory_hook(
+                    exec.trace_id,
+                    &format!("warning:{}", state.iterations),
+                    &warning,
+                    "escalation_warning",
+                )
+                .await;
+                Ok(None)
+            }
+            EscalationAction::HumanReviewEvent => Ok(None),
+        }
+    }
+
     /// Executes a single round of conversation with the agent.
     async fn single_execution(
         &self,
-        agent: &Agent,
-        history: &mut Vec<Message>,
-        context_variables: &mut ContextVariables,
-        model_override: Option<String>,
-        stream: bool,
-        debug: bool,
-        trace_id: &str,
+        state: &mut RunState,
+        exec: &mut ExecutionContext<'_>,
     ) -> SwarmResult<Response> {
-        let model = model_override.as_deref().unwrap_or(&agent.model).to_string();
-        let prompt_tokens = history.len() * 50; // rough estimate
+        self.check_budget(exec.trace_id, exec.budget).await?;
+        exec.budget.increment_iterations();
+        state.iterations = exec.budget.iterations;
+        record_iteration(state.agent.name());
+
+        let model = exec
+            .options
+            .model_override
+            .as_deref()
+            .unwrap_or(state.agent.model())
+            .to_string();
+        let prompt_tokens = (state.history.len() * 50) as u32;
+        if let Some(limit) = self.config.runtime_limits().max_tokens_per_request {
+            if prompt_tokens > limit {
+                let exhausted = BudgetExhausted::TokensPerRequest {
+                    used: prompt_tokens,
+                    limit,
+                };
+                self.emit_budget_event(exec.trace_id, &exhausted).await;
+                return Err(exhausted.into());
+            }
+        }
 
         self.emit(AgentEvent::LlmRequest {
-            trace_id: trace_id.to_string(),
+            trace_id: exec.trace_id.clone(),
             model: model.clone(),
-            prompt_tokens,
+            prompt_tokens: prompt_tokens as usize,
             timestamp: Utc::now(),
         })
         .await;
 
         let start = Instant::now();
-        let completion = self
-            .get_chat_completion(
-                agent,
-                &history.clone(),
-                context_variables,
-                model_override.clone(),
-                stream,
-                debug,
-            )
-            .await?;
+        let strategy = self.config.api_settings().retry_strategy().clone();
+        let completion = {
+            let mut delay = strategy.initial_delay();
+            let mut last_err: Option<SwarmError> = None;
+            let mut result = None;
+
+            for attempt in 0..=strategy.max_retries() {
+                let provider_before = self.provider_breaker.state_snapshot();
+                let provider_open = self.provider_breaker.is_open();
+                let provider_after = self.provider_breaker.state_snapshot();
+                if provider_after != provider_before {
+                    self.emit_breaker_event(
+                        exec.trace_id,
+                        &self.provider_breaker,
+                        provider_after.clone(),
+                        None,
+                    )
+                    .await;
+                }
+                if provider_open {
+                    return Err(SwarmError::Other(format!(
+                        "Provider circuit breaker '{}' is open",
+                        self.provider_breaker.name()
+                    )));
+                }
+
+                match self
+                    .get_chat_completion(
+                        &state.agent,
+                        &state.history,
+                        &state.context_variables,
+                        exec.options.model_override.clone(),
+                        exec.options.stream,
+                        exec.options.debug,
+                    )
+                    .await
+                {
+                    Ok(completion) => {
+                        let provider_before = self.provider_breaker.state_snapshot();
+                        self.provider_breaker.record_success();
+                        let provider_after = self.provider_breaker.state_snapshot();
+                        if provider_after != provider_before {
+                            self.emit_breaker_event(
+                                exec.trace_id,
+                                &self.provider_breaker,
+                                provider_after,
+                                None,
+                            )
+                            .await;
+                        }
+                        result = Some(completion);
+                        break;
+                    }
+                    Err(err) if attempt < strategy.max_retries() && err.is_retriable() => {
+                        let provider_before = self.provider_breaker.state_snapshot();
+                        let reason = err.to_string();
+                        let provider_after = self.provider_breaker.record_failure();
+                        if provider_after != provider_before {
+                            self.emit_breaker_event(
+                                exec.trace_id,
+                                &self.provider_breaker,
+                                provider_after,
+                                Some(reason.clone()),
+                            )
+                            .await;
+                        }
+                        tracing::warn!(
+                            "Retryable LLM error on attempt {}/{}, retrying in {}ms: {}",
+                            attempt + 1,
+                            strategy.max_retries(),
+                            delay.as_millis(),
+                            err
+                        );
+                        tokio::time::sleep(delay).await;
+                        let next_ms =
+                            (delay.as_millis() as f64 * strategy.backoff_factor() as f64) as u64;
+                        delay = Duration::from_millis(
+                            next_ms.min(strategy.max_delay().as_millis() as u64),
+                        );
+                        last_err = Some(err);
+                    }
+                    Err(err) => {
+                        let provider_before = self.provider_breaker.state_snapshot();
+                        let reason = err.to_string();
+                        let provider_after = self.provider_breaker.record_failure();
+                        if provider_after != provider_before {
+                            self.emit_breaker_event(
+                                exec.trace_id,
+                                &self.provider_breaker,
+                                provider_after,
+                                Some(reason),
+                            )
+                            .await;
+                        }
+                        last_err = Some(err);
+                        break;
+                    }
+                }
+            }
+
+            result.ok_or_else(|| {
+                last_err
+                    .unwrap_or_else(|| SwarmError::Other("Retry attempts exhausted".to_string()))
+            })?
+        };
         let latency_ms = start.elapsed().as_millis() as u64;
 
-        if completion.choices.is_empty() {
+        if completion.choices().is_empty() {
             return Err(SwarmError::ApiError(
                 "No choices returned from the model".to_string(),
             ));
         }
 
         let completion_tokens = completion
-            .choices
-            .first()
-            .and_then(|c| c.message.content().as_ref().map(|s| s.len() / 4))
-            .unwrap_or(0);
+            .usage()
+            .map(|usage| usage.completion_tokens)
+            .unwrap_or_else(|| {
+                completion
+                    .choices()
+                    .first()
+                    .and_then(|choice| choice.message.content().map(|text| (text.len() / 4) as u32))
+                    .unwrap_or(0)
+            });
+        let tokens_used = completion
+            .usage()
+            .map(|usage| usage.total_tokens)
+            .unwrap_or(prompt_tokens.saturating_add(completion_tokens));
+
+        exec.budget.add_tokens(tokens_used);
+        state.total_tokens = exec.budget.total_tokens;
+        self.check_budget(exec.trace_id, exec.budget).await?;
+        record_llm_latency(latency_ms as f64, &model);
+        record_token_usage(tokens_used as u64, &model);
 
         self.emit(AgentEvent::LlmResponse {
-            trace_id: trace_id.to_string(),
+            trace_id: exec.trace_id.clone(),
             model,
-            completion_tokens,
+            completion_tokens: completion_tokens as usize,
             latency_ms,
             timestamp: Utc::now(),
         })
         .await;
 
-        let choice = &completion.choices[0];
-        let message = choice.message.clone();
-        history.push(message.clone());
-
-        if let Some(function_call) = message.function_call() {
-            self.emit(AgentEvent::ToolCall {
-                trace_id: trace_id.to_string(),
-                tool_name: function_call.name().to_string(),
-                arguments: serde_json::from_str(function_call.arguments())
-                    .unwrap_or(Value::Null),
-                timestamp: Utc::now(),
-            })
-            .await;
-
-            let tool_start = Instant::now();
-            let func_response = self
-                .handle_function_call(function_call, &agent.functions, context_variables, debug)
+        let message = completion.choices()[0].message.clone();
+        if let Some(content) = message.content() {
+            self.enforce_content_policy(exec.trace_id, content, "llm_response")
                 .await?;
-            let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
-
-            let tool_result_content = func_response
-                .messages
-                .first()
-                .and_then(|m| m.content().map(|c| Value::String(c.to_string())))
-                .unwrap_or(Value::Null);
-            let tool_success = !tool_result_content
-                .as_str()
-                .map(|s| s.starts_with("Error:"))
-                .unwrap_or(false);
-
-            self.emit(AgentEvent::ToolResult {
-                trace_id: trace_id.to_string(),
-                tool_name: function_call.name().to_string(),
-                result: tool_result_content,
-                success: tool_success,
-                duration_ms: tool_duration_ms,
-                timestamp: Utc::now(),
-            })
-            .await;
-
-            history.extend(func_response.messages.clone());
-            context_variables.extend(func_response.context_variables);
+        }
+        if !state.agent.expected_response_fields().is_empty() {
+            let content = message.content().ok_or_else(|| {
+                SwarmError::ValidationError(
+                    "Expected a structured JSON response but assistant content was empty"
+                        .to_string(),
+                )
+            })?;
+            let structured: Value = serde_json::from_str(content).map_err(|error| {
+                SwarmError::ValidationError(format!("Expected structured JSON response: {}", error))
+            })?;
+            let expected_fields = state
+                .agent
+                .expected_response_fields()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            verify_structured_response(&structured, &expected_fields)?;
         }
 
-        let tokens_used = completion.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+        state.history.push(message.clone());
+        if let Some(content) = message.content() {
+            self.persist_memory_hook(
+                exec.trace_id,
+                &format!("assistant:{}:response", state.iterations),
+                content,
+                "assistant_response",
+            )
+            .await;
+        }
+
+        let mut termination_reason = None;
+        if let Some(function_call) = message.function_call() {
+            let known_tools = state
+                .agent
+                .functions()
+                .iter()
+                .map(|function| function.name())
+                .collect::<Vec<_>>();
+            let breaker = self.get_tool_breaker(function_call.name());
+
+            let tool_before = breaker.state_snapshot();
+            let tool_open = breaker.is_open();
+            let tool_after = breaker.state_snapshot();
+            if tool_after != tool_before {
+                self.emit_breaker_event(exec.trace_id, &breaker, tool_after.clone(), None)
+                    .await;
+            }
+            if tool_open {
+                return Err(SwarmError::Other(format!(
+                    "Tool circuit breaker '{}' is open",
+                    breaker.name()
+                )));
+            }
+
+            let arguments = serde_json::from_str(function_call.arguments()).unwrap_or(Value::Null);
+            let (_, sanitized_arguments) = self.sanitize_json_value(&arguments);
+            self.emit(AgentEvent::ToolCall {
+                trace_id: exec.trace_id.clone(),
+                tool_name: function_call.name().to_string(),
+                arguments: sanitized_arguments,
+                timestamp: Utc::now(),
+            })
+            .await;
+
+            self.check_budget(exec.trace_id, exec.budget).await?;
+            let tool_start = Instant::now();
+            let func_response = self
+                .handle_function_call(
+                    function_call,
+                    state.agent.functions(),
+                    &mut state.context_variables,
+                    exec.options.debug,
+                )
+                .await;
+            let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
+            exec.budget.increment_tool_calls();
+
+            match func_response {
+                Ok(func_response) => {
+                    let tool_result_content = func_response
+                        .messages
+                        .first()
+                        .and_then(|message| {
+                            message
+                                .content()
+                                .map(|content| Value::String(content.to_string()))
+                        })
+                        .unwrap_or(Value::Null);
+                    let tool_success = !tool_result_content
+                        .as_str()
+                        .map(|content| content.starts_with("Error:"))
+                        .unwrap_or(false);
+
+                    if tool_success {
+                        let tool_before = breaker.state_snapshot();
+                        breaker.record_success();
+                        let tool_after = breaker.state_snapshot();
+                        if tool_after != tool_before {
+                            self.emit_breaker_event(exec.trace_id, &breaker, tool_after, None)
+                                .await;
+                        }
+                    } else {
+                        let tool_before = breaker.state_snapshot();
+                        let tool_after = breaker.record_failure();
+                        if tool_after != tool_before {
+                            self.emit_breaker_event(
+                                exec.trace_id,
+                                &breaker,
+                                tool_after,
+                                Some("tool returned an error response".to_string()),
+                            )
+                            .await;
+                        }
+                    }
+
+                    let (classification, sanitized_result) =
+                        self.sanitize_json_value(&tool_result_content);
+                    self.emit(AgentEvent::ToolResult {
+                        trace_id: exec.trace_id.clone(),
+                        tool_name: function_call.name().to_string(),
+                        result: sanitized_result,
+                        success: tool_success,
+                        duration_ms: tool_duration_ms,
+                        timestamp: Utc::now(),
+                    })
+                    .await;
+                    record_tool_call(function_call.name(), tool_duration_ms as f64, tool_success);
+
+                    if let Some(content) = tool_result_content.as_str() {
+                        self.enforce_content_policy(exec.trace_id, content, "tool_result")
+                            .await?;
+                        self.persist_memory_hook(
+                            exec.trace_id,
+                            &format!("tool:{}:{}", function_call.name(), state.iterations),
+                            content,
+                            "tool_result",
+                        )
+                        .await;
+                    } else if let Some(classification) = classification {
+                        self.emit_guardrail_event(
+                            exec.trace_id,
+                            "tool_result_redaction",
+                            "redact",
+                            "non-string tool result redacted for audit storage",
+                            Some(classification),
+                        )
+                        .await;
+                    }
+
+                    if let Some(trigger) = exec.escalation.record_tool_call(
+                        function_call.name(),
+                        tool_success,
+                        &known_tools,
+                        function_call.arguments(),
+                    ) {
+                        if let Some(reason) =
+                            self.apply_escalation_trigger(state, exec, trigger).await?
+                        {
+                            termination_reason = Some(reason);
+                        }
+                    }
+
+                    state.history.extend(func_response.messages);
+                    state
+                        .context_variables
+                        .extend(func_response.context_variables);
+                    if let Some(agent) = func_response.agent {
+                        exec.budget.increment_depth();
+                        self.check_budget(exec.trace_id, exec.budget).await?;
+                        state.agent = agent;
+                    }
+                    if let Some(reason) = func_response.termination_reason {
+                        termination_reason = Some(reason);
+                    }
+                }
+                Err(err) => {
+                    let tool_before = breaker.state_snapshot();
+                    let tool_after = breaker.record_failure();
+                    if tool_after != tool_before {
+                        self.emit_breaker_event(
+                            exec.trace_id,
+                            &breaker,
+                            tool_after,
+                            Some(err.to_string()),
+                        )
+                        .await;
+                    }
+                    self.emit(AgentEvent::ToolResult {
+                        trace_id: exec.trace_id.clone(),
+                        tool_name: function_call.name().to_string(),
+                        result: Value::String(err.to_string()),
+                        success: false,
+                        duration_ms: tool_duration_ms,
+                        timestamp: Utc::now(),
+                    })
+                    .await;
+                    record_tool_call(function_call.name(), tool_duration_ms as f64, false);
+                    if let Some(trigger) = exec.escalation.record_tool_call(
+                        function_call.name(),
+                        false,
+                        &known_tools,
+                        function_call.arguments(),
+                    ) {
+                        let _ = self.apply_escalation_trigger(state, exec, trigger).await?;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
         Ok(Response {
             messages: vec![message],
-            agent: Some(agent.clone()),
-            context_variables: context_variables.clone(),
-            termination_reason: None,
+            agent: Some(state.agent.clone()),
+            context_variables: state.context_variables.clone(),
+            termination_reason,
             tokens_used,
         })
     }
 
-    /// Executes a step based on the provided XML–defined step.
+    /// Executes a step based on the provided XML-defined step.
     async fn execute_step(
         &self,
-        agent: &mut Agent,
-        history: &mut Vec<Message>,
-        context_variables: &mut ContextVariables,
-        model_override: Option<String>,
-        stream: bool,
-        debug: bool,
-        max_turns: usize,
-        step_number: usize,
+        state: &mut RunState,
         step: &Step,
-        trace_id: &str,
+        exec: &mut ExecutionContext<'_>,
     ) -> SwarmResult<Response> {
         if step.prompt.trim().is_empty() {
             return Err(SwarmError::ValidationError(
@@ -669,64 +1531,51 @@ impl Swarm {
             ));
         }
 
-        debug_print(debug, &format!("Executing Step {}", step_number));
+        debug_print(
+            exec.options.debug,
+            &format!("Executing Step {}", step.number),
+        );
 
         if let Some(agent_name) = &step.agent {
-            debug_print(debug, &format!("Switching to agent: {}", agent_name));
-            *agent = self.get_agent_by_name(agent_name)?;
+            debug_print(
+                exec.options.debug,
+                &format!("Switching to agent: {}", agent_name),
+            );
+            state.agent = self.get_agent_by_name(agent_name)?;
+            exec.budget.increment_depth();
+            self.check_budget(exec.trace_id, exec.budget).await?;
         }
 
         match step.action {
             crate::types::StepAction::RunOnce => {
-                let step_message = Message::user(step.prompt.clone())?;
-                history.push(step_message);
-                self.single_execution(
-                    agent,
-                    history,
-                    context_variables,
-                    model_override.clone(),
-                    stream,
-                    debug,
-                    trace_id,
-                )
-                .await
+                state.history.push(Message::user(step.prompt.clone())?);
+                let response = self.single_execution(state, exec).await?;
+                self.persist_iteration_state(exec.trace_id, state).await;
+                Ok(response)
             }
             crate::types::StepAction::Loop => {
-                let mut iteration_count: usize = 0;
-                loop {
-                    if iteration_count >= max_turns {
+                let mut loop_iterations = 0usize;
+                let termination_reason = loop {
+                    if loop_iterations >= exec.options.max_turns {
                         return Err(SwarmError::MaxIterationsError {
-                            max: max_turns,
-                            actual: iteration_count,
+                            max: exec.options.max_turns,
+                            actual: loop_iterations,
                         });
                     }
-                    iteration_count += 1;
-                    let step_message = Message::user(step.prompt.clone())?;
-                    history.push(step_message);
-                    let response = self
-                        .single_execution(
-                            agent,
-                            history,
-                            context_variables,
-                            model_override.clone(),
-                            stream,
-                            debug,
-                            trace_id,
-                        )
-                        .await?;
-                    if let Some(new_agent) = response.agent.clone() {
-                        *agent = new_agent;
-                    }
+                    loop_iterations += 1;
+                    state.history.push(Message::user(step.prompt.clone())?);
+                    let response = self.single_execution(state, exec).await?;
+                    self.persist_iteration_state(exec.trace_id, state).await;
                     if let Some(reason) = response.termination_reason {
-                        debug_print(debug, &format!("Loop terminated: {}", reason));
-                        break;
+                        debug_print(exec.options.debug, &format!("Loop terminated: {}", reason));
+                        break Some(reason);
                     }
-                }
+                };
                 Ok(Response {
-                    messages: history.clone(),
-                    agent: Some(agent.clone()),
-                    context_variables: context_variables.clone(),
-                    termination_reason: None,
+                    messages: state.history.clone(),
+                    agent: Some(state.agent.clone()),
+                    context_variables: state.context_variables.clone(),
+                    termination_reason,
                     tokens_used: 0,
                 })
             }
@@ -734,11 +1583,12 @@ impl Swarm {
     }
 
     /// Executes a multi-turn conversation with the AI agent.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
         mut agent: Agent,
         messages: Vec<Message>,
-        mut context_variables: ContextVariables,
+        context_variables: ContextVariables,
         model_override: Option<String>,
         stream: bool,
         debug: bool,
@@ -754,8 +1604,16 @@ impl Swarm {
             )));
         }
 
-        let trace_id = uuid::Uuid::new_v4().to_string();
+        let trace_id = TraceId::from(uuid::Uuid::new_v4().to_string());
+        let options = RunOptions {
+            model_override,
+            stream,
+            debug,
+            max_turns,
+        };
 
+        self.create_session_if_configured(&trace_id, agent.name())
+            .await;
         self.emit(AgentEvent::LoopStart {
             trace_id: trace_id.clone(),
             agent_name: agent.name().to_string(),
@@ -767,9 +1625,7 @@ impl Swarm {
             Instructions::Text(text) => text.clone(),
             Instructions::Function(func) => func(context_variables.clone()),
         };
-
         let (instructions_without_xml, xml_steps) = extract_xml_steps(&instructions)?;
-
         let steps = if let Some(xml_content) = xml_steps {
             parse_steps_from_xml(&xml_content)?
         } else {
@@ -777,68 +1633,209 @@ impl Swarm {
         };
 
         agent.instructions = Instructions::Text(instructions_without_xml);
-        let mut history = messages.clone();
-        let mut iterations: u32 = 0;
-        let mut total_tokens: u32 = 0;
+        let mut state = RunState {
+            agent,
+            history: messages,
+            context_variables,
+            iterations: 0,
+            total_tokens: 0,
+        };
+        let mut budget = BudgetEnforcer::new(self.config.runtime_limits().clone());
+        let mut escalation = EscalationDetector::new(self.escalation_config.clone());
+        let mut exec = ExecutionContext {
+            trace_id: &trace_id,
+            options: &options,
+            budget: &mut budget,
+            escalation: &mut escalation,
+        };
 
-        if !steps.steps.is_empty() {
-            for step in &steps.steps {
-                iterations += 1;
-                let response = self
-                    .execute_step(
-                        &mut agent,
-                        &mut history,
-                        &mut context_variables,
-                        model_override.clone(),
-                        stream,
-                        debug,
-                        max_turns,
-                        step.number,
-                        step,
-                        &trace_id,
-                    )
-                    .await?;
-                total_tokens += response.tokens_used;
-                if let Some(new_agent) = response.agent {
-                    agent = new_agent;
+        let result: SwarmResult<Response> = async {
+            self.apply_injection_policy(&trace_id, &mut state.history)
+                .await?;
+            for message in &state.history {
+                if let Some(content) = message.content() {
+                    self.enforce_content_policy(&trace_id, content, "input_message")
+                        .await?;
                 }
             }
-        } else {
-            debug_print(debug, "No steps defined. Executing default behavior.");
-            iterations += 1;
-            let response = self
-                .single_execution(
-                    &agent,
-                    &mut history,
-                    &mut context_variables,
-                    model_override,
-                    stream,
-                    debug,
-                    &trace_id,
-                )
-                .await?;
-            total_tokens += response.tokens_used;
-            history.extend(response.messages);
-            context_variables.extend(response.context_variables);
-        }
 
-        self.emit(AgentEvent::LoopEnd {
-            trace_id,
-            agent_name: agent.name().to_string(),
-            iterations,
-            total_tokens: total_tokens as usize,
-            termination_reason: crate::phase::TerminationReason::TaskComplete,
-            timestamp: Utc::now(),
-        })
+            let mut termination_reason = None;
+            if !steps.steps.is_empty() {
+                for step in &steps.steps {
+                    let response = self.execute_step(&mut state, step, &mut exec).await?;
+                    if let Some(reason) = response.termination_reason {
+                        termination_reason = Some(reason);
+                        break;
+                    }
+                }
+            } else {
+                debug_print(
+                    options.debug,
+                    "No steps defined. Executing default behavior.",
+                );
+                let response = self.single_execution(&mut state, &mut exec).await?;
+                self.persist_iteration_state(&trace_id, &state).await;
+                termination_reason = response.termination_reason;
+            }
+
+            self.store_messages_if_configured(&trace_id, &state.history)
+                .await;
+            if let Ok(serialized_history) = serde_json::to_string(&state.history) {
+                self.persist_memory_hook(
+                    &trace_id,
+                    "history:final",
+                    &serialized_history,
+                    "conversation_completion",
+                )
+                .await;
+            }
+
+            let loop_reason = termination_reason
+                .clone()
+                .unwrap_or(crate::phase::TerminationReason::TaskComplete);
+            self.emit(AgentEvent::LoopEnd {
+                trace_id: trace_id.clone(),
+                agent_name: state.agent.name().to_string(),
+                iterations: state.iterations,
+                total_tokens: state.total_tokens as usize,
+                termination_reason: loop_reason.clone(),
+                timestamp: Utc::now(),
+            })
+            .await;
+            self.complete_session_if_configured(&trace_id, &loop_reason.to_string())
+                .await;
+
+            Ok(Response {
+                messages: state.history.clone(),
+                agent: Some(state.agent.clone()),
+                context_variables: state.context_variables.clone(),
+                termination_reason,
+                tokens_used: state.total_tokens,
+            })
+        }
         .await;
 
-        Ok(Response {
-            messages: history,
-            agent: Some(agent),
-            context_variables,
-            termination_reason: None,
-            tokens_used: total_tokens,
-        })
+        match result {
+            Ok(response) => Ok(response),
+            Err(err) => {
+                self.emit(AgentEvent::Error {
+                    trace_id: trace_id.clone(),
+                    message: err.to_string(),
+                    error_type: "run_error".to_string(),
+                    timestamp: Utc::now(),
+                })
+                .await;
+                self.store_messages_if_configured(&trace_id, &state.history)
+                    .await;
+                self.complete_session_if_configured(&trace_id, &format!("error: {}", err))
+                    .await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Saves a checkpoint if a `CheckpointStore` is configured.
+    ///
+    /// Failures are non-fatal — they are traced at WARN level but do not abort
+    /// the in-memory agent loop.
+    async fn save_checkpoint_if_configured(
+        &self,
+        session_id: &str,
+        agent_name: &str,
+        messages: &[Message],
+        context_variables: &ContextVariables,
+        iteration: u32,
+        total_tokens: u32,
+    ) {
+        let Some(store) = &self.checkpoint_store else {
+            return;
+        };
+        let data = CheckpointData::new(
+            messages.to_vec(),
+            context_variables.clone(),
+            agent_name,
+            iteration,
+            TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens,
+            },
+        );
+        let envelope = CheckpointEnvelope::new(session_id, data);
+        if let Err(e) = store.save_checkpoint(&envelope).await {
+            tracing::warn!(
+                session_id = %session_id,
+                iteration  = iteration,
+                "checkpoint save failed (non-fatal): {}",
+                e
+            );
+        }
+    }
+
+    /// Resume a previously interrupted session from its most recent checkpoint.
+    ///
+    /// Requires a `CheckpointStore` to be configured on the `Swarm`.
+    /// The saved agent name must still exist in the agent registry.
+    ///
+    /// Returns a structured error for:
+    /// - missing checkpoint store
+    /// - no checkpoint found for `session_id`
+    /// - incompatible checkpoint version
+    /// - unknown agent in checkpoint
+    /// - no remaining iterations (checkpoint at or past `max_loop_iterations`)
+    pub async fn resume_from_checkpoint(
+        &self,
+        session_id: &str,
+        model_override: Option<String>,
+        stream: bool,
+        debug: bool,
+    ) -> SwarmResult<Response> {
+        let store = self.checkpoint_store.as_ref().ok_or_else(|| {
+            SwarmError::ConfigError(
+                "resume_from_checkpoint requires a checkpoint store; \
+                 configure one via SwarmBuilder::with_checkpoint_store"
+                    .to_string(),
+            )
+        })?;
+
+        let envelope = store.load_checkpoint(session_id).await?.ok_or_else(|| {
+            SwarmError::Other(format!("No checkpoint found for session '{}'", session_id))
+        })?;
+
+        // Validate before any state mutation.
+        envelope.validate()?;
+
+        let agent = self
+            .get_agent_by_name(&envelope.payload.current_agent)
+            .map_err(|_| {
+                SwarmError::AgentNotFoundError(format!(
+                    "checkpoint references agent '{}' which is not registered",
+                    envelope.payload.current_agent
+                ))
+            })?;
+
+        let remaining = self
+            .config
+            .max_loop_iterations()
+            .saturating_sub(envelope.payload.iteration) as usize;
+
+        if remaining == 0 {
+            return Err(SwarmError::MaxIterationsError {
+                max: self.config.max_loop_iterations() as usize,
+                actual: envelope.payload.iteration as usize,
+            });
+        }
+
+        self.run(
+            agent,
+            envelope.payload.messages,
+            envelope.payload.context_variables,
+            model_override,
+            stream,
+            debug,
+            remaining,
+        )
+        .await
     }
 
     pub fn get_agent_by_name(&self, name: &str) -> SwarmResult<Agent> {
@@ -861,14 +1858,15 @@ impl SwarmConfig {
                 "valid_api_url_prefixes cannot be empty".to_string(),
             ));
         }
-        if self.request_timeout() < MIN_REQUEST_TIMEOUT || self.request_timeout() > MAX_REQUEST_TIMEOUT
+        if self.request_timeout() < MIN_REQUEST_TIMEOUT
+            || self.request_timeout() > MAX_REQUEST_TIMEOUT
         {
             return Err(SwarmError::ValidationError(format!(
                 "request_timeout must be between {} and {} seconds",
                 MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT
             )));
         }
-        if self.loop_control().default_max_iterations == 0 {
+        if self.loop_control().default_max_iterations() == 0 {
             return Err(SwarmError::ValidationError(
                 "default_max_iterations must be greater than 0".to_string(),
             ));
@@ -897,7 +1895,11 @@ impl Agent {
                         "Named function call policy cannot be empty".to_string(),
                     ));
                 }
-                if !self.functions().iter().any(|function| function.name == *name) {
+                if !self
+                    .functions()
+                    .iter()
+                    .any(|function| function.name() == *name)
+                {
                     return Err(SwarmError::ValidationError(format!(
                         "Named function call policy references unknown function: {}",
                         name

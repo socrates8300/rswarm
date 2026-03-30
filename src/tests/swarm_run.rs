@@ -1,6 +1,6 @@
 #![allow(unused)]
-    use crate::core::Swarm;
-    use crate::types::{Agent, ContextVariables, Instructions, Message};
+use crate::core::Swarm;
+use crate::types::{Agent, ContextVariables, Instructions, Message};
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use openai_mock::routes::configure_completion_routes;
 use serde_json::json;
@@ -101,12 +101,12 @@ mod tests {
             .build()?;
 
         // Define a simple user message
-        let messages = vec![Message::user("Hello!").expect("Failed to create request message")];
+        let messages = [Message::user("Hello!").expect("Failed to create request message")];
 
         // Create request payload
         let req = test::TestRequest::post()
             .uri("/completions")
-            .set_json(&json!({
+            .set_json(json!({
                 "prompt": "Hello!",
                 "model": "gpt-4"
             }))

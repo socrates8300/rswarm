@@ -1,10 +1,9 @@
 //  ./src/validation.rs
-/// Validation module for Swarm API requests and configurations
-///
-/// This module provides validation functions to ensure that API requests
-/// and configurations meet the required criteria before execution.
+/// Validation module for Swarm API requests and configurations.
 use crate::error::{SwarmError, SwarmResult};
-use crate::types::{Agent, Instructions, Message, SwarmConfig};
+use crate::types::{Agent, Instructions, Message, RuntimeLimits, SwarmConfig};
+use serde_json::Value;
+use std::time::Instant;
 use url::Url;
 
 /// Validates an API request before execution
@@ -51,13 +50,17 @@ pub fn validate_api_request(
     // Validate model
     if let Some(model_name) = model {
         if model_name.trim().is_empty() {
-            return Err(SwarmError::ValidationError("Model name cannot be empty".to_string()));
+            return Err(SwarmError::ValidationError(
+                "Model name cannot be empty".to_string(),
+            ));
         }
     }
 
     // Validate agent
     if agent.name().trim().is_empty() {
-        return Err(SwarmError::ValidationError("Agent name cannot be empty".to_string()));
+        return Err(SwarmError::ValidationError(
+            "Agent name cannot be empty".to_string(),
+        ));
     }
 
     match agent.instructions() {
@@ -76,6 +79,194 @@ pub fn validate_api_request(
         message.validate()?;
     }
 
+    Ok(())
+}
+
+// =============================================================================
+// #40 — Cumulative budget enforcer
+// =============================================================================
+
+/// Reason why a budget limit was exhausted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BudgetExhausted {
+    TokenBudget { used: u32, limit: u32 },
+    TokensPerRequest { used: u32, limit: u32 },
+    WallTime { elapsed_secs: u64, limit: u64 },
+    ToolCallQuota { used: u32, limit: u32 },
+    MaxDepth { depth: u32, limit: u32 },
+}
+
+impl std::fmt::Display for BudgetExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TokenBudget { used, limit } => write!(
+                f,
+                "token budget exhausted: {} / {} tokens used",
+                used, limit
+            ),
+            Self::TokensPerRequest { used, limit } => write!(
+                f,
+                "per-request token limit exceeded: {} / {} tokens used",
+                used, limit
+            ),
+            Self::WallTime {
+                elapsed_secs,
+                limit,
+            } => write!(
+                f,
+                "wall-time limit exceeded: {}s elapsed, limit {}s",
+                elapsed_secs, limit
+            ),
+            Self::ToolCallQuota { used, limit } => write!(
+                f,
+                "tool call quota exhausted: {} / {} calls used",
+                used, limit
+            ),
+            Self::MaxDepth { depth, limit } => write!(
+                f,
+                "max recursion depth exceeded: depth {} / limit {}",
+                depth, limit
+            ),
+        }
+    }
+}
+
+impl From<BudgetExhausted> for SwarmError {
+    fn from(e: BudgetExhausted) -> Self {
+        SwarmError::Other(e.to_string())
+    }
+}
+
+/// Tracks cumulative resource usage against configured limits.
+///
+/// Call [`BudgetEnforcer::check`] at the top of each iteration to detect
+/// exhaustion before it becomes a runaway condition.
+pub struct BudgetEnforcer {
+    limits: RuntimeLimits,
+    start: Instant,
+    /// Number of loop iterations completed.
+    pub iterations: u32,
+    /// Cumulative tokens consumed (prompt + completion).
+    pub total_tokens: u32,
+    /// Cumulative tool calls made.
+    pub tool_calls: u32,
+    /// Current agent-handoff nesting depth.
+    pub depth: u32,
+}
+
+impl BudgetEnforcer {
+    pub fn new(limits: RuntimeLimits) -> Self {
+        Self {
+            limits,
+            start: Instant::now(),
+            iterations: 0,
+            total_tokens: 0,
+            tool_calls: 0,
+            depth: 0,
+        }
+    }
+
+    /// Check all configured limits. Returns `Err(BudgetExhausted)` the first
+    /// limit that is exceeded, `Ok(())` when all limits are within bounds.
+    pub fn check(&self) -> Result<(), BudgetExhausted> {
+        if let Some(budget) = self.limits.token_budget {
+            if self.total_tokens >= budget {
+                return Err(BudgetExhausted::TokenBudget {
+                    used: self.total_tokens,
+                    limit: budget,
+                });
+            }
+        }
+        if let Some(max_secs) = self.limits.max_wall_time_secs {
+            let elapsed = self.start.elapsed().as_secs();
+            if elapsed >= max_secs {
+                return Err(BudgetExhausted::WallTime {
+                    elapsed_secs: elapsed,
+                    limit: max_secs,
+                });
+            }
+        }
+        if let Some(quota) = self.limits.max_tool_calls {
+            if self.tool_calls >= quota {
+                return Err(BudgetExhausted::ToolCallQuota {
+                    used: self.tool_calls,
+                    limit: quota,
+                });
+            }
+        }
+        if let Some(max_depth) = self.limits.max_depth {
+            if self.depth >= max_depth {
+                return Err(BudgetExhausted::MaxDepth {
+                    depth: self.depth,
+                    limit: max_depth,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn add_tokens(&mut self, count: u32) {
+        self.total_tokens = self.total_tokens.saturating_add(count);
+    }
+    pub fn increment_iterations(&mut self) {
+        self.iterations = self.iterations.saturating_add(1);
+    }
+    pub fn increment_tool_calls(&mut self) {
+        self.tool_calls = self.tool_calls.saturating_add(1);
+    }
+    pub fn increment_depth(&mut self) {
+        self.depth = self.depth.saturating_add(1);
+    }
+    pub fn decrement_depth(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+}
+
+// =============================================================================
+// #45 — Output verification for tool calls and structured LLM responses
+// =============================================================================
+
+/// Verify that `args` (a JSON object) contains all fields listed under
+/// `schema["required"]`.
+///
+/// `schema` is the `parameters` field of a `ToolSchema` — a JSON Schema object.
+/// Returns `Ok(())` if all required fields are present or if `required` is
+/// absent from the schema.
+pub fn verify_tool_arguments(args: &Value, schema: &Value) -> SwarmResult<()> {
+    let required = match schema.get("required").and_then(|v| v.as_array()) {
+        Some(r) => r,
+        None => return Ok(()), // no required fields declared
+    };
+    for field in required {
+        let field_name = field.as_str().unwrap_or_default();
+        let present = args
+            .as_object()
+            .map(|m| m.contains_key(field_name))
+            .unwrap_or(false);
+        if !present {
+            return Err(SwarmError::ValidationError(format!(
+                "tool argument '{}' is required but missing",
+                field_name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Verify that a structured JSON response from an LLM contains all
+/// `expected_fields`. Returns `Ok(())` on success.
+pub fn verify_structured_response(response: &Value, expected_fields: &[&str]) -> SwarmResult<()> {
+    let obj = response.as_object().ok_or_else(|| {
+        SwarmError::ValidationError("structured response must be a JSON object".to_string())
+    })?;
+    for field in expected_fields {
+        if !obj.contains_key(*field) {
+            return Err(SwarmError::ValidationError(format!(
+                "structured response missing required field '{}'",
+                field
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -105,7 +296,9 @@ pub fn validate_api_request(
 pub fn validate_api_url(url: &str, config: &SwarmConfig) -> SwarmResult<()> {
     // Check if URL is empty
     if url.trim().is_empty() {
-        return Err(SwarmError::ValidationError("API URL cannot be empty".to_string()));
+        return Err(SwarmError::ValidationError(
+            "API URL cannot be empty".to_string(),
+        ));
     }
 
     // Parse URL

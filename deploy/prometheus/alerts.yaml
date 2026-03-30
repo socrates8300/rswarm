@@ -1,0 +1,121 @@
+groups:
+  - name: rswarm
+    rules:
+
+      # -----------------------------------------------------------------------
+      # Latency
+      # -----------------------------------------------------------------------
+
+      - alert: RswarmHighLlmLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(rswarm_llm_latency_ms_bucket[5m])) by (model, le)
+          ) > 5000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "rswarm: LLM P95 latency > 5 s (model={{ $labels.model }})"
+          description: >
+            The 95th-percentile round-trip time to the LLM has exceeded 5 000 ms
+            for 2 consecutive minutes. Check provider status and network health.
+          runbook: docs/runbooks/high-llm-latency.md
+
+      - alert: RswarmHighToolLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(rswarm_tool_latency_ms_bucket[5m])) by (tool, le)
+          ) > 10000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "rswarm: tool P95 latency > 10 s (tool={{ $labels.tool }})"
+          description: >
+            A tool is taking more than 10 s at P95. Investigate the tool
+            implementation or its downstream dependency.
+
+      # -----------------------------------------------------------------------
+      # Error rate
+      # -----------------------------------------------------------------------
+
+      - alert: RswarmHighToolErrorRate
+        expr: |
+          sum(rate(rswarm_tool_outcome_total{outcome="err"}[5m])) by (tool)
+          /
+          sum(rate(rswarm_tool_outcome_total[5m])) by (tool) > 0.25
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "rswarm: tool error rate > 25 % (tool={{ $labels.tool }})"
+          description: >
+            More than 25 % of calls to '{{ $labels.tool }}' are failing.
+            Check the tool implementation and any external services it depends on.
+
+      # -----------------------------------------------------------------------
+      # Circuit breakers
+      # -----------------------------------------------------------------------
+
+      - alert: RswarmCircuitBreakerOpen
+        expr: |
+          increase(rswarm_circuit_breaker_state_total{state="open"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "rswarm: circuit breaker opened ({{ $labels.breaker }})"
+          description: >
+            The circuit breaker for '{{ $labels.breaker }}' has tripped to the
+            OPEN state. Calls to this component are being rejected until the
+            reset window elapses.
+          runbook: docs/runbooks/circuit-breaker-open.md
+
+      # -----------------------------------------------------------------------
+      # Budget / quota exhaustion
+      # -----------------------------------------------------------------------
+
+      - alert: RswarmBudgetExhausted
+        expr: |
+          increase(rswarm_budget_exhausted_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "rswarm: budget limit exhausted ({{ $labels.limit_type }})"
+          description: >
+            An agent run exceeded the configured '{{ $labels.limit_type }}' limit.
+            Review the limit configuration or investigate runaway loops.
+          runbook: docs/runbooks/budget-exhausted.md
+
+      # -----------------------------------------------------------------------
+      # Guardrails
+      # -----------------------------------------------------------------------
+
+      - alert: RswarmGuardrailSpike
+        expr: |
+          increase(rswarm_guardrail_triggered_total[5m]) > 10
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "rswarm: guardrail triggered > 10 times in 5 min ({{ $labels.type }})"
+          description: >
+            The '{{ $labels.type }}' guardrail is firing frequently. This may
+            indicate a prompt injection campaign or a misconfigured agent.
+
+      # -----------------------------------------------------------------------
+      # Iteration throughput
+      # -----------------------------------------------------------------------
+
+      - alert: RswarmIterationRateDrop
+        expr: |
+          rate(rswarm_iteration_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "rswarm: no agent iterations in the last 5 minutes"
+          description: >
+            No agent loop iterations have been recorded. This may be expected
+            in low-traffic environments, or could indicate the process has stalled.

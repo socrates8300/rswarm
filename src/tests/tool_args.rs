@@ -2,11 +2,13 @@
 mod tests {
     use crate::{InvocationArgs, ToolCallSpec, ToolError, ToolSchema};
     use serde_json::json;
+    use std::f64::consts::PI;
 
     #[test]
     fn test_invocation_args_preserve_scalar_and_object_types() {
-        let string_args = InvocationArgs::from_value(json!("rust")).expect("string args should work");
-        let number_args = InvocationArgs::from_value(json!(3.14)).expect("number args should work");
+        let string_args =
+            InvocationArgs::from_value(json!("rust")).expect("string args should work");
+        let number_args = InvocationArgs::from_value(json!(PI)).expect("number args should work");
         let bool_args = InvocationArgs::from_value(json!(true)).expect("bool args should work");
         let object_args = InvocationArgs::from_value(json!({
             "query": "rust",
@@ -16,7 +18,7 @@ mod tests {
         .expect("object args should work");
 
         assert_eq!(string_args.as_str(), Some("rust"));
-        assert_eq!(number_args.as_f64(), Some(3.14));
+        assert_eq!(number_args.as_f64(), Some(PI));
         assert_eq!(bool_args.as_bool(), Some(true));
         assert_eq!(
             object_args

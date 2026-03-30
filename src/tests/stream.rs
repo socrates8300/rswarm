@@ -41,11 +41,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        // Set the environment variable to point to our WireMock server.
-        std::env::set_var(
-            "OPENAI_API_URL",
-            format!("{}/completions", &mock_server.uri()),
-        );
+        let api_url = format!("{}/completions", &mock_server.uri());
 
         // Create an HTTP client.
         let client = Client::builder()
@@ -54,7 +50,7 @@ mod tests {
             .expect("Failed to build client");
         let api_key = "sk-test123456789".to_string();
 
-        let streamer = Streamer::new(client, api_key);
+        let streamer = Streamer::new(client, api_key, api_url);
         let agent = test_agent();
         let history: Vec<Message> =
             vec![Message::user("Hello!").expect("Failed to create history message")];

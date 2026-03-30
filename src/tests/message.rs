@@ -48,7 +48,9 @@ mod tests {
             }
         }))
         .expect_err("Assistant messages cannot carry content and function_call");
-        assert!(double_payload.to_string().contains("either content or a function call"));
+        assert!(double_payload
+            .to_string()
+            .contains("either content or a function call"));
 
         let invalid_role = serde_json::from_value::<Message>(json!({
             "role": "moderator",
@@ -59,7 +61,10 @@ mod tests {
 
         let invalid_function_call = FunctionCall::new("lookup_docs", "not-json")
             .expect_err("Function calls require JSON arguments");
-        assert!(matches!(invalid_function_call, SwarmError::ValidationError(_)));
+        assert!(matches!(
+            invalid_function_call,
+            SwarmError::ValidationError(_)
+        ));
     }
 
     #[test]
@@ -67,8 +72,12 @@ mod tests {
         let agent = test_agent();
         let invalid_empty_assistant =
             Message::from_parts_unchecked(MessageRole::Assistant, None, None, None);
-        let invalid_function_without_name =
-            Message::from_parts_unchecked(MessageRole::Function, Some("done".to_string()), None, None);
+        let invalid_function_without_name = Message::from_parts_unchecked(
+            MessageRole::Function,
+            Some("done".to_string()),
+            None,
+            None,
+        );
         let invalid_system_function_call = Message::from_parts_unchecked(
             MessageRole::System,
             Some("system".to_string()),

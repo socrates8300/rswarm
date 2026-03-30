@@ -146,7 +146,9 @@ impl CompletionResponse {
     }
 
     pub fn tool_calls(&self) -> Option<Vec<ToolCallInResponse>> {
-        self.choices.first().and_then(|c| c.message.tool_calls.clone())
+        self.choices
+            .first()
+            .and_then(|c| c.message.tool_calls.clone())
     }
 }
 
@@ -261,11 +263,7 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    pub fn new(
-        client: Client,
-        api_key: impl Into<String>,
-        api_url: impl Into<String>,
-    ) -> Self {
+    pub fn new(client: Client, api_key: impl Into<String>, api_url: impl Into<String>) -> Self {
         Self {
             client,
             api_key: api_key.into(),
@@ -280,10 +278,7 @@ impl OpenAiProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
-    async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<CompletionResponse, SwarmError> {
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, SwarmError> {
         request.validate()?;
 
         let response = self
@@ -296,10 +291,9 @@ impl LlmProvider for OpenAiProvider {
             .map_err(|e| SwarmError::NetworkError(e.to_string()))?;
 
         if !response.status().is_success() {
-            let text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
+            let text = response.text().await.map_err(|e| {
+                SwarmError::NetworkError(format!("failed to read error response body: {}", e))
+            })?;
             return Err(SwarmError::ApiError(text));
         }
 
@@ -309,10 +303,7 @@ impl LlmProvider for OpenAiProvider {
             .map_err(|e| SwarmError::DeserializationError(e.to_string()))?;
 
         serde_json::from_str(&text).map_err(|e| {
-            SwarmError::DeserializationError(format!(
-                "Failed to parse CompletionResponse: {}",
-                e
-            ))
+            SwarmError::DeserializationError(format!("Failed to parse CompletionResponse: {}", e))
         })
     }
 

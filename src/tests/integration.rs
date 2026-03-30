@@ -1,13 +1,14 @@
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use serde_json::json;
-
 use crate::core::Swarm;
 use crate::error::SwarmError;
 use crate::event::{AgentEvent, EventSubscriber};
 use crate::tool::{ClosureTool, InvocationArgs, Tool};
-use crate::types::{AgentFunction, ContextVariables, Instructions, Message, ResultType};
+use crate::types::{
+    AgentFunction, AgentFunctionHandler, ContextVariables, Instructions, Message, ResultType,
+};
+use async_trait::async_trait;
+use serde_json::json;
 
 // --- Test subscriber that collects events -----------------------------------
 
@@ -34,30 +35,6 @@ impl EventSubscriber for CollectingSubscriber {
     }
 }
 
-// --- Helpers ----------------------------------------------------------------
-
-fn chat_response_body(content: &str) -> String {
-    json!({
-        "id": "chatcmpl-test",
-        "object": "chat.completion",
-        "created": 0,
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": content,
-                "name": null,
-                "function_call": null
-            },
-            "finish_reason": "stop"
-        }],
-        "usage": null
-    })
-    .to_string()
-}
-
-// --- Tests ------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,28 +50,13 @@ mod tests {
     // 1. ClosureTool wraps an AgentFunction and executes it via the Tool trait
     #[tokio::test]
     async fn test_closure_tool_executes() {
-        use std::future::Future;
-        use std::pin::Pin;
-
-        let fn_arc: Arc<
-            dyn Fn(
-                    ContextVariables,
-                )
-                    -> Pin<Box<dyn Future<Output = Result<ResultType, anyhow::Error>> + Send>>
-                + Send
-                + Sync,
-        > = Arc::new(|_ctx: ContextVariables| {
+        let fn_arc: Arc<AgentFunctionHandler> = Arc::new(|_ctx: ContextVariables| {
             Box::pin(async move { Ok(ResultType::Value("hello from closure".to_string())) })
         });
 
-        let agent_fn = AgentFunction {
-            name: "greet".to_string(),
-            function: fn_arc,
-            accepts_context_variables: false,
-        };
+        let agent_fn = AgentFunction::new("greet", fn_arc, false).expect("valid agent function");
 
-        let tool =
-            ClosureTool::from_agent_function(agent_fn).with_description("greet the user");
+        let tool = ClosureTool::from_agent_function(agent_fn).with_description("greet the user");
 
         assert_eq!(tool.name(), "greet");
         assert_eq!(tool.description(), "greet the user");
@@ -125,23 +87,21 @@ mod tests {
     async fn test_loop_events_emitted() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({
-                    "id": "chatcmpl-test",
-                    "object": "chat.completion",
-                    "created": 0,
-                    "model": "gpt-4",
-                    "choices": [{
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": "done"
-                        },
-                        "finish_reason": "stop"
-                    }],
-                    "usage": null
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-4",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "done"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": null
+            })))
             .mount(&mock_server)
             .await;
 
@@ -158,26 +118,42 @@ mod tests {
 
         let messages = vec![Message::user("hi").expect("message failed")];
         swarm
-            .run(agent, messages, ContextVariables::new(), None, false, false, 5)
+            .run(
+                agent,
+                messages,
+                ContextVariables::new(),
+                None,
+                false,
+                false,
+                5,
+            )
             .await
             .expect("run failed");
 
         let events = collector.collected();
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::LoopStart { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::LoopStart { .. })),
             "LoopStart not emitted; got: {:?}",
             events.iter().map(|e| e.to_string()).collect::<Vec<_>>()
         );
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::LlmRequest { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::LlmRequest { .. })),
             "LlmRequest not emitted"
         );
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::LlmResponse { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::LlmResponse { .. })),
             "LlmResponse not emitted"
         );
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::LoopEnd { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::LoopEnd { .. })),
             "LoopEnd not emitted"
         );
     }

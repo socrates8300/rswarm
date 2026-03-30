@@ -1,4 +1,8 @@
-use crate::error::SwarmError;
+pub mod qdrant;
+pub mod sqlite_vss;
+pub mod vector;
+
+use crate::error::{SwarmError, SwarmResult};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
@@ -18,13 +22,18 @@ pub struct SlidingWindowMemory {
 }
 
 impl SlidingWindowMemory {
-    pub fn new(max_size: usize) -> Self {
-        Self {
+    pub fn new(max_size: usize) -> SwarmResult<Self> {
+        if max_size == 0 {
+            return Err(SwarmError::ValidationError(
+                "SlidingWindowMemory max_size must be greater than zero".to_string(),
+            ));
+        }
+        Ok(Self {
             max_size,
             storage: HashMap::new(),
             insertion_order: Vec::new(),
             token_estimates: HashMap::new(),
-        }
+        })
     }
 
     pub fn len(&self) -> usize {
