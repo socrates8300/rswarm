@@ -1204,6 +1204,7 @@ pub struct Response {
     pub agent: Option<Agent>,
     pub context_variables: ContextVariables,
     pub termination_reason: Option<TerminationReason>,
+    pub tokens_used: u32,
 }
 
 /// Represents a collection of steps parsed from XML.

@@ -24,6 +24,11 @@ pub struct CompletionRequest {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolSchema>>,
+    /// Legacy OpenAI functions format (used for streaming and function_call responses).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub functions: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_call: Option<Value>,
     #[serde(default)]
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -40,6 +45,8 @@ impl CompletionRequest {
             messages,
             model: model.into(),
             tools: None,
+            functions: None,
+            function_call: None,
             stream: false,
             temperature: None,
             max_tokens: None,
@@ -49,6 +56,12 @@ impl CompletionRequest {
 
     pub fn with_tools(mut self, tools: Vec<ToolSchema>) -> Self {
         self.tools = Some(tools);
+        self
+    }
+
+    pub fn with_functions(mut self, functions: Vec<Value>, function_call: Option<Value>) -> Self {
+        self.functions = Some(functions);
+        self.function_call = function_call;
         self
     }
 
@@ -317,6 +330,6 @@ impl LlmProvider for OpenAiProvider {
 
     fn model_name(&self) -> &str {
         // Model selection is per-request via CompletionRequest.model.
-        &self.api_url
+        "openai"
     }
 }

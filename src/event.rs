@@ -147,6 +147,11 @@ impl Default for LoggingSubscriber {
 #[async_trait]
 impl EventSubscriber for LoggingSubscriber {
     async fn on_event(&self, event: &AgentEvent) {
-        println!("[{}] {}", event.timestamp().format("%Y-%m-%d %H:%M:%S"), event);
+        tracing::info!(
+            trace_id = %event.trace_id(),
+            "[{}] {}",
+            event.timestamp().format("%Y-%m-%d %H:%M:%S"),
+            event
+        );
     }
 }

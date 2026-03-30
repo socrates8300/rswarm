@@ -395,15 +395,52 @@ impl Swarm {
             Ok(full_response)
         } else {
             // Non-streaming path: delegate to provider, then map response via JSON round-trip.
-            let request = CompletionRequest::new(model, messages);
+            let functions: Vec<Value> = agent
+                .functions
+                .iter()
+                .map(function_to_json)
+                .collect::<SwarmResult<Vec<Value>>>()?;
+            let function_call_policy = agent.function_call().to_wire_value().map(|v| json!(v));
+
+            let mut request = CompletionRequest::new(model, messages);
+            if !functions.is_empty() {
+                request = request.with_functions(functions, function_call_policy);
+            }
+
             let provider_response = self.provider.complete(request).await?;
             debug_print(debug, &format!("Provider Response: {:?}", provider_response));
-            let json_val = serde_json::to_value(&provider_response).map_err(|e| {
+
+            let mut json_val = serde_json::to_value(&provider_response).map_err(|e| {
                 SwarmError::DeserializationError(format!(
                     "Failed to serialize provider response: {}",
                     e
                 ))
             })?;
+
+            // Map tool_calls[0] → function_call for backward-compat with ChatCompletionResponse.
+            if let Some(choices) = json_val["choices"].as_array_mut() {
+                for choice in choices.iter_mut() {
+                    if let Some(tool_calls) = choice["message"]["tool_calls"].as_array() {
+                        if let Some(first) = tool_calls.first() {
+                            let name = first["function"]["name"].clone();
+                            let args = first["function"]["arguments"].clone();
+                            let args_str = if args.is_string() {
+                                args.clone()
+                            } else {
+                                Value::String(
+                                    serde_json::to_string(&args).unwrap_or_default(),
+                                )
+                            };
+                            choice["message"]["function_call"] =
+                                json!({"name": name, "arguments": args_str});
+                        }
+                        choice["message"]
+                            .as_object_mut()
+                            .map(|m| m.remove("tool_calls"));
+                    }
+                }
+            }
+
             serde_json::from_value(json_val)
                 .map_err(|e| SwarmError::DeserializationError(e.to_string()))
         }
@@ -433,6 +470,7 @@ impl Swarm {
             agent: None,
             context_variables: HashMap::new(),
             termination_reason: None,
+            tokens_used: 0,
         };
 
         if let Some(func) = function_map.get(function_call.name()) {
@@ -590,11 +628,13 @@ impl Swarm {
             context_variables.extend(func_response.context_variables);
         }
 
+        let tokens_used = completion.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
         Ok(Response {
             messages: vec![message],
             agent: Some(agent.clone()),
             context_variables: context_variables.clone(),
             termination_reason: None,
+            tokens_used,
         })
     }
 
@@ -681,6 +721,7 @@ impl Swarm {
                     agent: Some(agent.clone()),
                     context_variables: context_variables.clone(),
                     termination_reason: None,
+                    tokens_used: 0,
                 })
             }
         }
@@ -732,6 +773,7 @@ impl Swarm {
         agent.instructions = Instructions::Text(instructions_without_xml);
         let mut history = messages.clone();
         let mut iterations: u32 = 0;
+        let mut total_tokens: u32 = 0;
 
         if !steps.steps.is_empty() {
             for step in &steps.steps {
@@ -768,6 +810,7 @@ impl Swarm {
                     &trace_id,
                 )
                 .await?;
+            total_tokens += response.tokens_used;
             history.extend(response.messages);
             context_variables.extend(response.context_variables);
         }
@@ -776,7 +819,7 @@ impl Swarm {
             trace_id,
             agent_name: agent.name().to_string(),
             iterations,
-            total_tokens: 0,
+            total_tokens: total_tokens as usize,
             termination_reason: crate::phase::TerminationReason::TaskComplete,
             timestamp: Utc::now(),
         })
@@ -787,6 +830,7 @@ impl Swarm {
             agent: Some(agent),
             context_variables,
             termination_reason: None,
+            tokens_used: total_tokens,
         })
     }
 
