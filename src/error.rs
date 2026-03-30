@@ -93,8 +93,8 @@ pub enum SwarmError {
     ContextError(String),
 
     /// Maximum iterations exceeded errors
-    #[error("Maximum iterations exceeded: {0}")]
-    MaxIterationsError(String),
+    #[error("Maximum iterations exceeded: reached {actual} of {max} allowed")]
+    MaxIterationsError { max: usize, actual: usize },
 
     /// JSON processing errors
     #[error(transparent)]

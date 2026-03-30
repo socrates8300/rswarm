@@ -1,5 +1,9 @@
 pub mod agent;
+pub mod agent_serde;
 pub mod builder;
 pub mod initialization;
+pub mod message;
 pub mod stream;
 pub mod swarm_run;
+pub mod tool_args;
+pub mod integration;

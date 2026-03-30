@@ -4,7 +4,7 @@ use crate::error::{SwarmError, SwarmResult};
 ///
 /// This module provides various helper functions for debugging, message handling,
 /// XML processing, and function conversion utilities.
-use crate::types::{AgentFunction, FunctionCall, Message, Steps};
+use crate::types::{AgentFunction, Message, Steps};
 use quick_xml::de::from_str as xml_from_str;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -42,17 +42,11 @@ pub fn merge_chunk_message(message: &mut Message, delta: &serde_json::Map<String
         match key.as_str() {
             "content" => {
                 if let Some(content) = value.as_str() {
-                    if let Some(existing_content) = &mut message.content {
-                        existing_content.push_str(content);
-                    } else {
-                        message.content = Some(content.to_string());
-                    }
+                    message.append_content_fragment(content);
                 }
             }
             "function_call" => {
-                if let Ok(function_call) = serde_json::from_value::<FunctionCall>(value.clone()) {
-                    message.function_call = Some(function_call);
-                }
+                message.merge_function_call_delta(value);
             }
             _ => {}
         }

@@ -13,14 +13,12 @@ mod tests {
 
     // Helper function to create a simple test agent.
     fn test_agent() -> Agent {
-        Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("You are a helpful assistant.".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        }
+        Agent::new(
+            "test_agent",
+            "gpt-4",
+            Instructions::Text("You are a helpful assistant.".to_string()),
+        )
+        .expect("Failed to create test agent")
     }
 
     #[tokio::test]
@@ -58,12 +56,8 @@ mod tests {
 
         let streamer = Streamer::new(client, api_key);
         let agent = test_agent();
-        let history: Vec<Message> = vec![Message {
-            role: "user".to_string(),
-            content: Some("Hello!".to_string()),
-            name: None,
-            function_call: None,
-        }];
+        let history: Vec<Message> =
+            vec![Message::user("Hello!").expect("Failed to create history message")];
         let context_variables = ContextVariables::new();
 
         let stream = streamer.stream_chat(&agent, &history, &context_variables, None, true);
@@ -74,8 +68,8 @@ mod tests {
             match result {
                 Ok(message) => {
                     // Verify that the message role and content are as expected.
-                    assert_eq!(message.role, "assistant");
-                    assert_eq!(message.content.unwrap(), "Hello from stream!");
+                    assert_eq!(message.role().as_str(), "assistant");
+                    assert_eq!(message.content(), Some("Hello from stream!"));
                 }
                 Err(e) => {
                     panic!("Stream returned an error: {:?}", e);

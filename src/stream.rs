@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::env;
 
-use crate::constants::{OPENAI_DEFAULT_API_URL, ROLE_SYSTEM};
+use crate::constants::OPENAI_DEFAULT_API_URL;
 use crate::error::{SwarmError, SwarmResult};
 use crate::types::{Agent, ChatCompletionResponse, ContextVariables, Instructions, Message};
 use crate::util::function_to_json;
@@ -49,12 +49,7 @@ impl Streamer {
             Instructions::Text(text) => text.clone(),
             Instructions::Function(func) => func(context_variables.clone()),
         };
-        messages.push(Message {
-            role: ROLE_SYSTEM.to_string(),
-            content: Some(system_instructions),
-            name: None,
-            function_call: None,
-        });
+        messages.push(Message::system(system_instructions).unwrap());
         messages.extend_from_slice(history);
 
         // Prepare any functions for the API.
@@ -73,6 +68,9 @@ impl Streamer {
         });
         if !functions.is_empty() {
             request_body["functions"] = Value::Array(functions);
+        }
+        if let Some(function_call) = agent.function_call().to_wire_value() {
+            request_body["function_call"] = json!(function_call);
         }
 
         // Determine API URL from environment or default.

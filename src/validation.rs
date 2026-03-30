@@ -56,11 +56,11 @@ pub fn validate_api_request(
     }
 
     // Validate agent
-    if agent.name.trim().is_empty() {
+    if agent.name().trim().is_empty() {
         return Err(SwarmError::ValidationError("Agent name cannot be empty".to_string()));
     }
 
-    match &agent.instructions {
+    match agent.instructions() {
         Instructions::Text(text) => {
             if text.trim().is_empty() {
                 return Err(SwarmError::ValidationError(
@@ -73,20 +73,7 @@ pub fn validate_api_request(
 
     // Validate messages
     for message in messages {
-        if message.role.trim().is_empty() {
-            return Err(SwarmError::ValidationError("Message role cannot be empty".to_string()));
-        }
-
-        // Only validate content if there's no function call
-        if message.function_call.is_none() {
-            if let Some(content) = &message.content {
-                if content.trim().is_empty() {
-                    return Err(SwarmError::ValidationError(
-                        "Message content cannot be empty".to_string(),
-                    ));
-                }
-            }
-        }
+        message.validate()?;
     }
 
     Ok(())
@@ -131,13 +118,19 @@ pub fn validate_api_url(url: &str, config: &SwarmConfig) -> SwarmResult<()> {
     }
 
     // Verify against allowed prefixes
-    if !config.valid_api_url_prefixes
+    if !config
+        .valid_api_url_prefixes()
         .iter()
-        .any(|prefix| url.starts_with(prefix))
+        .any(|prefix| url.starts_with(prefix.as_str()))
     {
         return Err(SwarmError::ValidationError(format!(
             "API URL must start with one of: {}",
-            config.valid_api_url_prefixes.join(", ")
+            config
+                .valid_api_url_prefixes()
+                .iter()
+                .map(|prefix| prefix.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )));
     }
 

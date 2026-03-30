@@ -2931,36 +2931,12 @@ dependencies = [
 
 [[package]]
 name = "rswarm"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2714818fcabd3e6724fd1d804d1da35093967618f224ec2307d6e33e46b7e3a"
-dependencies = [
- "actix-web",
- "anyhow",
- "chrono",
- "dotenv",
- "futures",
- "lazy_static",
- "mcp_rs",
- "openai-mock",
- "quick-xml",
- "regex",
- "reqwest 0.12.12",
- "serde",
- "serde_json",
- "thiserror 2.0.11",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "rswarm"
 version = "0.1.7"
 dependencies = [
  "actix-web",
  "anyhow",
  "async-stream",
+ "async-trait",
  "chrono",
  "dotenv",
  "futures",
@@ -2978,6 +2954,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "wiremock",
 ]
 
@@ -2995,7 +2972,7 @@ dependencies = [
  "log",
  "quick-xml",
  "reqwest 0.11.27",
- "rswarm 0.1.4",
+ "rswarm",
  "scraper",
  "serde",
  "serde_json",
@@ -4097,6 +4074,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93d59ca99a559661b96bf898d8fce28ed87935fd2bea9f05983c1464dd6c71b1"
 dependencies = [
  "getrandom 0.3.1",
+ "serde",
 ]
 
 [[package]]

@@ -5,7 +5,9 @@ mod browse_docs;
 use anyhow::{Context, Result};
 use dotenv::dotenv;
 use rswarm::types::AgentFunction;
-use rswarm::{Agent, Instructions, Swarm};
+use rswarm::{Agent, Instructions, Swarm, ToolCallExecution};
+use std::future::Future;
+use std::pin::Pin;
 use std::{collections::HashMap, env, fs, sync::Arc};
 // use tokio::signal;
 use crate::browse_docs::browse_rust_docs;
@@ -23,7 +25,13 @@ async fn main() -> Result<()> {
     // Define the browse_docs function for agents
     let browse_docs_function = AgentFunction {
         name: "browse_docs".to_string(),
-        function: Arc::new(browse_rust_docs),
+        function: Arc::new(
+            |args| -> Pin<
+                Box<dyn Future<Output = Result<rswarm::types::ResultType, anyhow::Error>> + Send>,
+            > {
+                Box::pin(async move { browse_rust_docs(args) })
+            },
+        ),
         accepts_context_variables: false,
     };
 
@@ -86,44 +94,34 @@ fn initialize_agents(
     // Primary Agent
     agents.insert(
         "Agent".to_string(),
-        Agent {
-            name: "Agent".to_string(),
-            model: model.to_string(),
-            instructions: Instructions::Text(prompt.to_string()),
-            functions: Vec::new(),
-            function_call: None,
-            parallel_tool_calls: true,
-        },
+        Agent::new("Agent", model, Instructions::Text(prompt.to_string()))?
+            .with_tool_call_execution(ToolCallExecution::Parallel),
     );
 
     // Agent Manager
     agents.insert(
         "AgentManager".to_string(),
-        Agent {
-            name: "AgentManager".to_string(),
-            model: model.to_string(),
-            instructions: Instructions::Text(
+        Agent::new(
+            "AgentManager",
+            model,
+            Instructions::Text(
                 "You are a CTO with 20 years of experience. Oversee the execution of tasks by other agents, conduct reviews, and provide feedback.".to_string(),
             ),
-            functions: Vec::new(),
-            function_call: None,
-            parallel_tool_calls: true,
-        },
+        )?
+        .with_tool_call_execution(ToolCallExecution::Parallel),
     );
 
     // Documentation Browser Agent
     agents.insert(
         "DocBrowserAgent".to_string(),
-        Agent {
-            name: "DocBrowserAgent".to_string(),
-            model: model.to_string(),
-            instructions: Instructions::Text(
+        Agent::new(
+            "DocBrowserAgent",
+            model,
+            Instructions::Text(
                 "You can browse Rust documentation using the 'browse_docs' function. The 'browse_docs' function takes a string as an argument (query) and returns a string.".to_string(),
             ),
-            functions: vec![browse_docs_function],
-            function_call: None,
-            parallel_tool_calls: false,
-        },
+        )?
+        .with_functions(vec![browse_docs_function]),
     );
 
     Ok(agents)
@@ -149,9 +147,9 @@ fn display_response(response: &rswarm::Response) {
     for message in &response.messages {
         println!(
             "{} {}: {}",
-            message.name.as_deref().unwrap_or("Unknown"),
-            message.role,
-            message.content.as_deref().unwrap_or("")
+            message.name().unwrap_or("Unknown"),
+            message.role(),
+            message.content().unwrap_or("")
         );
         println!("--------------------------------\n");
     }

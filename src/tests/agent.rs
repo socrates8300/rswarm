@@ -1,31 +1,40 @@
 #[cfg(test)]
 mod tests {
-    use crate::types::{AgentFunction, ContextVariables, ResultType};
+    use crate::types::{
+        AgentFunction, ContextVariables, FunctionCallPolicy, ResultType, ToolCallExecution,
+    };
     use crate::{Agent, Instructions, Swarm, SwarmConfig, SwarmError};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
 
+    fn text_agent(name: &str, model: &str, instructions: &str) -> Agent {
+        Agent::new(name, model, Instructions::Text(instructions.to_string()))
+            .expect("Failed to create test agent")
+    }
+
+    fn function_agent(
+        name: &str,
+        model: &str,
+        instruction_fn: Arc<dyn Fn(ContextVariables) -> String + Send + Sync>,
+    ) -> Agent {
+        Agent::new(name, model, Instructions::Function(instruction_fn))
+            .expect("Failed to create test agent")
+    }
+
     #[test]
     fn test_create_basic_agent() {
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("Basic test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = text_agent("test_agent", "gpt-4", "Basic test instructions");
 
-        assert_eq!(agent.name, "test_agent");
-        assert_eq!(agent.model, "gpt-4");
-        match agent.instructions {
+        assert_eq!(agent.name(), "test_agent");
+        assert_eq!(agent.model(), "gpt-4");
+        match agent.instructions() {
             Instructions::Text(text) => assert_eq!(text, "Basic test instructions"),
             _ => panic!("Expected Text instructions"),
         }
-        assert!(agent.functions.is_empty());
-        assert!(agent.function_call.is_none());
-        assert!(!agent.parallel_tool_calls);
+        assert!(agent.functions().is_empty());
+        assert_eq!(agent.function_call(), &FunctionCallPolicy::Disabled);
+        assert_eq!(agent.tool_call_execution(), ToolCallExecution::Serial);
     }
 
     #[test]
@@ -33,18 +42,11 @@ mod tests {
         let instruction_fn =
             Arc::new(|_vars: ContextVariables| -> String { "Dynamic instructions".to_string() });
 
-        let agent = Agent {
-            name: "function_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Function(instruction_fn),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = function_agent("function_agent", "gpt-4", instruction_fn);
 
         // Test the function instructions
         let context = ContextVariables::new();
-        match &agent.instructions {
+        match agent.instructions() {
             Instructions::Function(f) => assert_eq!(f(context), "Dynamic instructions"),
             _ => panic!("Expected Function instructions"),
         }
@@ -68,32 +70,21 @@ mod tests {
                 accepts_context_variables: false,
             };
 
-        let agent = Agent {
-            name: "function_enabled_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("Test with functions".to_string()),
-            functions: vec![test_function],
-            function_call: Some("auto".to_string()),
-            parallel_tool_calls: true,
-        };
+        let agent = text_agent("function_enabled_agent", "gpt-4", "Test with functions")
+            .with_functions(vec![test_function])
+            .with_function_call_policy(FunctionCallPolicy::Auto)
+            .with_tool_call_execution(ToolCallExecution::Parallel);
 
-        assert_eq!(agent.functions.len(), 1);
-        assert_eq!(agent.functions[0].name, "test_function");
-        assert_eq!(agent.functions[0].accepts_context_variables, false);
-        assert_eq!(agent.function_call, Some("auto".to_string()));
-        assert!(agent.parallel_tool_calls);
+        assert_eq!(agent.functions().len(), 1);
+        assert_eq!(agent.functions()[0].name, "test_function");
+        assert!(!agent.functions()[0].accepts_context_variables);
+        assert_eq!(agent.function_call(), &FunctionCallPolicy::Auto);
+        assert_eq!(agent.tool_call_execution(), ToolCallExecution::Parallel);
     }
 
     #[test]
     fn test_agent_in_swarm_registry() {
-        let agent = Agent {
-            name: "registry_test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("Test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = text_agent("registry_test_agent", "gpt-4", "Test instructions");
 
         let swarm = Swarm::builder()
             .with_api_key("sk-test123456789".to_string())
@@ -101,28 +92,15 @@ mod tests {
             .build()
             .expect("Failed to build Swarm");
 
-        assert!(swarm.agent_registry.contains_key(&agent.name));
-        let registered_agent = swarm.agent_registry.get(&agent.name).unwrap();
-        assert_eq!(registered_agent.name, "registry_test_agent");
-        assert_eq!(registered_agent.model, "gpt-4");
+        assert!(swarm.agents().contains_key(agent.name()));
+        let registered_agent = swarm.agents().get(agent.name()).unwrap();
+        assert_eq!(registered_agent.name(), "registry_test_agent");
+        assert_eq!(registered_agent.model(), "gpt-4");
     }
 
     #[test]
     fn test_agent_empty_name() {
-        let agent = Agent {
-            name: "".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("Test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
-
-        // Try to register the agent in a Swarm
-        let result = Swarm::builder()
-            .with_api_key("sk-test123456789".to_string())
-            .with_agent(agent)
-            .build();
+        let result = Agent::new("", "gpt-4", Instructions::Text("Test instructions".to_string()));
 
         // Verify error
         assert!(result.is_err());
@@ -136,20 +114,7 @@ mod tests {
 
     #[test]
     fn test_agent_empty_model() {
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "".to_string(),
-            instructions: Instructions::Text("Test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
-
-        // Try to register the agent in a Swarm
-        let result = Swarm::builder()
-            .with_api_key("sk-test123456789".to_string())
-            .with_agent(agent)
-            .build();
+        let result = Agent::new("test_agent", "", Instructions::Text("Test instructions".to_string()));
 
         // Verify error
         assert!(result.is_err());
@@ -163,14 +128,7 @@ mod tests {
 
     #[test]
     fn test_agent_invalid_model_prefix() {
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "invalid-model".to_string(), // Doesn't start with valid prefix
-            instructions: Instructions::Text("Test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = text_agent("test_agent", "invalid-model", "Test instructions");
 
         // Try to register the agent in a Swarm
         let result = Swarm::builder()
@@ -190,20 +148,7 @@ mod tests {
 
     #[test]
     fn test_agent_missing_instructions() {
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("".to_string()), // Empty instructions
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
-
-        // Try to register the agent in a Swarm
-        let result = Swarm::builder()
-            .with_api_key("sk-test123456789".to_string())
-            .with_agent(agent)
-            .build();
+        let result = Agent::new("test_agent", "gpt-4", Instructions::Text("".to_string()));
 
         // Verify error
         assert!(result.is_err());
@@ -217,14 +162,7 @@ mod tests {
 
     #[test]
     fn test_agent_with_invalid_model_prefix() {
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "invalid-model".to_string(),
-            instructions: Instructions::Text("Test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = text_agent("test_agent", "invalid-model", "Test instructions");
 
         let result = Swarm::builder()
             .with_api_key("sk-test123456789".to_string())
@@ -239,19 +177,7 @@ mod tests {
 
     #[test]
     fn test_agent_with_empty_model() {
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "".to_string(),
-            instructions: Instructions::Text("Test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
-
-        let result = Swarm::builder()
-            .with_api_key("sk-test123456789".to_string())
-            .with_agent(agent)
-            .build();
+        let result = Agent::new("test_agent", "", Instructions::Text("Test instructions".to_string()));
 
         assert!(matches!(result, Err(SwarmError::ValidationError(_))));
         if let Err(SwarmError::ValidationError(msg)) = result {
@@ -261,14 +187,7 @@ mod tests {
 
     #[test]
     fn test_agent_with_valid_model_prefix() {
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(), // Valid prefix
-            instructions: Instructions::Text("Test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = text_agent("test_agent", "gpt-4", "Test instructions");
 
         let result = Swarm::builder()
             .with_api_key("sk-test123456789".to_string())
@@ -280,20 +199,12 @@ mod tests {
 
     #[test]
     fn test_custom_model_prefix_validation() {
-        // Create a custom config with specific model prefixes
-        let config = SwarmConfig {
-            valid_model_prefixes: vec!["custom-".to_string()],
-            ..SwarmConfig::default()
-        };
+        let mut config = SwarmConfig::default();
+        config
+            .set_valid_model_prefixes(vec!["custom-".to_string()])
+            .unwrap();
 
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "custom-model".to_string(),
-            instructions: Instructions::Text("Test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = text_agent("test_agent", "custom-model", "Test instructions");
 
         let result = Swarm::builder()
             .with_api_key("sk-test123456789".to_string())
@@ -306,14 +217,7 @@ mod tests {
 
     #[test]
     fn test_agent_with_valid_text_instructions() {
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("Valid test instructions".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = text_agent("test_agent", "gpt-4", "Valid test instructions");
 
         let result = Swarm::builder()
             .with_api_key("sk-test123456789".to_string())
@@ -322,8 +226,8 @@ mod tests {
 
         assert!(result.is_ok());
         if let Ok(swarm) = result {
-            let stored_agent = swarm.agent_registry.get("test_agent").unwrap();
-            match &stored_agent.instructions {
+            let stored_agent = swarm.agents().get("test_agent").unwrap();
+            match stored_agent.instructions() {
                 Instructions::Text(text) => assert_eq!(text, "Valid test instructions"),
                 _ => panic!("Expected Text instructions"),
             }
@@ -332,19 +236,7 @@ mod tests {
 
     #[test]
     fn test_agent_with_empty_text_instructions() {
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
-
-        let result = Swarm::builder()
-            .with_api_key("sk-test123456789".to_string())
-            .with_agent(agent)
-            .build();
+        let result = Agent::new("test_agent", "gpt-4", Instructions::Text("".to_string()));
 
         assert!(result.is_err());
         match result {
@@ -357,19 +249,11 @@ mod tests {
 
     #[test]
     fn test_agent_with_whitespace_only_text_instructions() {
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("    \n\t    ".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
-
-        let result = Swarm::builder()
-            .with_api_key("sk-test123456789".to_string())
-            .with_agent(agent)
-            .build();
+        let result = Agent::new(
+            "test_agent",
+            "gpt-4",
+            Instructions::Text("    \n\t    ".to_string()),
+        );
 
         assert!(result.is_err());
         match result {
@@ -383,14 +267,7 @@ mod tests {
     #[test]
     fn test_agent_with_multiline_text_instructions() {
         let instructions = "Line 1\nLine 2\nLine 3".to_string();
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text(instructions.clone()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = text_agent("test_agent", "gpt-4", &instructions);
 
         let result = Swarm::builder()
             .with_api_key("sk-test123456789".to_string())
@@ -399,8 +276,8 @@ mod tests {
 
         assert!(result.is_ok());
         if let Ok(swarm) = result {
-            let stored_agent = swarm.agent_registry.get("test_agent").unwrap();
-            match &stored_agent.instructions {
+            let stored_agent = swarm.agents().get("test_agent").unwrap();
+            match stored_agent.instructions() {
                 Instructions::Text(text) => assert_eq!(text.as_str(), instructions.as_str()),
                 _ => panic!("Expected Text instructions"),
             }
@@ -412,17 +289,10 @@ mod tests {
         let instruction_fn =
             Arc::new(|_: ContextVariables| -> String { "Basic function instructions".to_string() });
 
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Function(instruction_fn),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = function_agent("test_agent", "gpt-4", instruction_fn);
 
         let context = ContextVariables::new();
-        match &agent.instructions {
+        match agent.instructions() {
             Instructions::Function(f) => assert_eq!(f(context), "Basic function instructions"),
             _ => panic!("Expected Function instructions"),
         }
@@ -437,19 +307,12 @@ mod tests {
             }
         });
 
-        let agent = Agent {
-            name: "context_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Function(instruction_fn),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = function_agent("context_agent", "gpt-4", instruction_fn);
 
         let mut context = ContextVariables::new();
         context.insert("test_key".to_string(), "test_value".to_string());
 
-        match &agent.instructions {
+        match agent.instructions() {
             Instructions::Function(f) => assert_eq!(f(context), "Context value: test_value"),
             _ => panic!("Expected Function instructions"),
         }
@@ -460,14 +323,7 @@ mod tests {
         let instruction_fn =
             Arc::new(|_: ContextVariables| -> String { "Swarm function instructions".to_string() });
 
-        let agent = Agent {
-            name: "swarm_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Function(instruction_fn),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = function_agent("swarm_agent", "gpt-4", instruction_fn);
 
         let swarm = Swarm::builder()
             .with_api_key("sk-test123456789".to_string())
@@ -476,9 +332,9 @@ mod tests {
             .expect("Failed to build Swarm");
 
         let context = ContextVariables::new();
-        let stored_agent = swarm.agent_registry.get("swarm_agent").unwrap();
+        let stored_agent = swarm.agents().get("swarm_agent").unwrap();
 
-        match &stored_agent.instructions {
+        match stored_agent.instructions() {
             Instructions::Function(f) => assert_eq!(f(context), "Swarm function instructions"),
             _ => panic!("Expected Function instructions"),
         }
@@ -504,18 +360,11 @@ mod tests {
             }
         });
 
-        let agent = Agent {
-            name: "complex_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Function(instruction_fn),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = function_agent("complex_agent", "gpt-4", instruction_fn);
 
         // Test with empty context
         let empty_context = ContextVariables::new();
-        match &agent.instructions {
+        match agent.instructions() {
             Instructions::Function(f) => assert_eq!(f(empty_context), "Default instructions"),
             _ => panic!("Expected Function instructions"),
         }
@@ -523,7 +372,7 @@ mod tests {
         // Test with partial context
         let mut partial_context = ContextVariables::new();
         partial_context.insert("name".to_string(), "Test Name".to_string());
-        match &agent.instructions {
+        match agent.instructions() {
             Instructions::Function(f) => assert_eq!(f(partial_context), "Name: Test Name"),
             _ => panic!("Expected Function instructions"),
         }
@@ -532,7 +381,7 @@ mod tests {
         let mut full_context = ContextVariables::new();
         full_context.insert("name".to_string(), "Test Name".to_string());
         full_context.insert("role".to_string(), "Test Role".to_string());
-        match &agent.instructions {
+        match agent.instructions() {
             Instructions::Function(f) => {
                 assert_eq!(f(full_context), "Name: Test Name\nRole: Test Role")
             }

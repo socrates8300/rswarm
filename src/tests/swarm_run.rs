@@ -1,6 +1,6 @@
 #![allow(unused)]
-use crate::core::Swarm;
-use crate::types::{Agent, ContextVariables, Instructions, Message};
+    use crate::core::Swarm;
+    use crate::types::{Agent, ContextVariables, Instructions, Message};
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use openai_mock::routes::configure_completion_routes;
 use serde_json::json;
@@ -87,14 +87,11 @@ mod tests {
         .await;
 
         // Setup Agent
-        let agent = Agent {
-            name: "test_agent".to_string(),
-            model: "gpt-4".to_string(),
-            instructions: Instructions::Text("You are a helpful assistant.".to_string()),
-            functions: vec![],
-            function_call: None,
-            parallel_tool_calls: false,
-        };
+        let agent = Agent::new(
+            "test_agent",
+            "gpt-4",
+            Instructions::Text("You are a helpful assistant.".to_string()),
+        )?;
 
         // Build Swarm with the mock server's API URL
         let swarm = Swarm::builder()
@@ -104,12 +101,7 @@ mod tests {
             .build()?;
 
         // Define a simple user message
-        let messages = vec![Message {
-            role: "user".to_string(),
-            content: Some("Hello!".to_string()),
-            name: None,
-            function_call: None,
-        }];
+        let messages = vec![Message::user("Hello!").expect("Failed to create request message")];
 
         // Create request payload
         let req = test::TestRequest::post()
