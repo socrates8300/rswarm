@@ -2,6 +2,10 @@
 mod tests {
     use crate::{Swarm, SwarmConfig, Agent, Instructions, SwarmError};
     use crate::constants::{OPENAI_DEFAULT_API_URL, MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT};
+    use std::sync::Mutex;
+
+    // Serializes tests that read/write OPENAI_API_KEY to prevent races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn test_valid_swarm_initialization() {
@@ -50,23 +54,21 @@ fn test_valid_swarm_initialization() {
 
 #[test]
 fn test_default_swarm_initialization() {
-    // Test default initialization using environment variable
+    let _guard = ENV_LOCK.lock().unwrap();
     std::env::set_var("OPENAI_API_KEY", "sk-test123456789");
 
     let swarm = Swarm::default();
 
-    // Verify default values
     assert_eq!(swarm.api_key().as_str(), "sk-test123456789");
     assert!(swarm.agents().is_empty());
     assert_eq!(swarm.config().api_url(), OPENAI_DEFAULT_API_URL);
 
-    // Clean up
     std::env::remove_var("OPENAI_API_KEY");
 }
 
 #[test]
 fn test_missing_api_key() {
-    // Remove API key from environment if present
+    let _guard = ENV_LOCK.lock().unwrap();
     std::env::remove_var("OPENAI_API_KEY");
 
     // Attempt to create Swarm without API key

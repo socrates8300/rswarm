@@ -610,15 +610,21 @@ impl Swarm {
                 .await?;
             let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
 
+            let tool_result_content = func_response
+                .messages
+                .first()
+                .and_then(|m| m.content().map(|c| Value::String(c.to_string())))
+                .unwrap_or(Value::Null);
+            let tool_success = !tool_result_content
+                .as_str()
+                .map(|s| s.starts_with("Error:"))
+                .unwrap_or(false);
+
             self.emit(AgentEvent::ToolResult {
                 trace_id: trace_id.to_string(),
                 tool_name: function_call.name().to_string(),
-                result: func_response
-                    .messages
-                    .first()
-                    .and_then(|m| m.content().map(|c| Value::String(c.to_string())))
-                    .unwrap_or(Value::Null),
-                success: true,
+                result: tool_result_content,
+                success: tool_success,
                 duration_ms: tool_duration_ms,
                 timestamp: Utc::now(),
             })
@@ -663,10 +669,10 @@ impl Swarm {
             ));
         }
 
-        println!("Executing Step {}", step_number);
+        debug_print(debug, &format!("Executing Step {}", step_number));
 
         if let Some(agent_name) = &step.agent {
-            println!("Switching to agent: {}", agent_name);
+            debug_print(debug, &format!("Switching to agent: {}", agent_name));
             *agent = self.get_agent_by_name(agent_name)?;
         }
 
@@ -792,6 +798,7 @@ impl Swarm {
                         &trace_id,
                     )
                     .await?;
+                total_tokens += response.tokens_used;
                 if let Some(new_agent) = response.agent {
                     agent = new_agent;
                 }
