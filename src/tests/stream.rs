@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::stream::Streamer;
-    use crate::types::{Agent, ContextVariables, Instructions, Message};
+    use crate::types::{Agent, ApiKey, ContextVariables, Instructions, Message};
     #[allow(unused)]
     use crate::SwarmError;
     use futures_util::{pin_mut, StreamExt};
@@ -48,7 +48,7 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .expect("Failed to build client");
-        let api_key = "sk-test123456789".to_string();
+        let api_key = ApiKey::new("sk-test123456789").expect("valid test key");
 
         let streamer = Streamer::new(client, api_key, api_url);
         let agent = test_agent();

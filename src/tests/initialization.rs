@@ -66,16 +66,14 @@ mod tests {
 
     #[test]
     fn test_default_swarm_initialization() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("OPENAI_API_KEY", "sk-test123456789");
-
-        let swarm = Swarm::default();
+        let swarm = Swarm::builder()
+            .with_api_key("sk-test123456789".to_string())
+            .build()
+            .expect("SwarmBuilder should succeed with a valid API key");
 
         assert_eq!(swarm.api_key().as_str(), "sk-test123456789");
         assert!(swarm.agents().is_empty());
         assert_eq!(swarm.config().api_url(), OPENAI_DEFAULT_API_URL);
-
-        std::env::remove_var("OPENAI_API_KEY");
     }
 
     #[test]

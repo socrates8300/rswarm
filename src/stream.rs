@@ -6,19 +6,21 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::error::{SwarmError, SwarmResult};
-use crate::types::{Agent, ChatCompletionResponse, ContextVariables, Instructions, Message};
+use crate::types::{
+    Agent, ApiKey, ContextVariables, FunctionCall, Instructions, Message, MessageRole,
+};
 use crate::util::{debug_print, function_to_json};
 
 /// Streamer provides a streaming–based API to receive agent responses incrementally.
 pub struct Streamer {
     client: Client,
-    api_key: String,
+    api_key: ApiKey,
     api_url: String,
 }
 
 impl Streamer {
     /// Create a new Streamer instance using the provided HTTP Client, API key, and API URL.
-    pub fn new(client: Client, api_key: String, api_url: String) -> Self {
+    pub fn new(client: Client, api_key: ApiKey, api_url: String) -> Self {
         Self {
             client,
             api_key,
@@ -85,7 +87,7 @@ impl Streamer {
             // Send POST request.
             let response = client
                 .post(api_url)
-                .bearer_auth(api_key)
+                .bearer_auth(api_key.as_str())
                 .json(&request_body)
                 .send()
                 .await
@@ -97,23 +99,64 @@ impl Streamer {
 
             // Now get the streaming body.
             let mut byte_stream = response.bytes_stream();
-            while let Some(chunk_result) = byte_stream.next().await {
+            // Line buffer: TCP chunks can split SSE `data:` lines across boundaries.
+            let mut line_buf = String::new();
+            'sse: while let Some(chunk_result) = byte_stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
-                        let text_chunk = String::from_utf8_lossy(&chunk);
-                        // Each line is expected to be prefixed with "data: ".
-                        for line in text_chunk.lines() {
-                            if let Some(stripped) = line.strip_prefix("data: ") {
-                                let json_str = stripped.trim();
+                        line_buf.push_str(&String::from_utf8_lossy(&chunk));
+                        // Process every complete line (terminated by \n).
+                        while let Some(newline_pos) = line_buf.find('\n') {
+                            let line = line_buf[..newline_pos]
+                                .trim_end_matches('\r')
+                                .to_string();
+                            line_buf.drain(..=newline_pos);
+
+                            if let Some(json_str) = line.strip_prefix("data: ") {
+                                let json_str = json_str.trim();
                                 if json_str == "[DONE]" {
-                                    break;
+                                    break 'sse;
                                 }
-                                // Deserialize the partial response.
-                                let partial: ChatCompletionResponse = serde_json::from_str(json_str)
+                                // Parse as raw Value to avoid validation failures
+                                // on empty-content delta messages.
+                                let chunk_val: Value = serde_json::from_str(json_str)
                                     .map_err(|e| SwarmError::DeserializationError(e.to_string()))?;
-                                // Yield each message.
-                                for choice in partial.into_choices() {
-                                    yield choice.message;
+                                if let Some(choices) = chunk_val["choices"].as_array() {
+                                    for choice in choices {
+                                        // Real OpenAI SSE uses "delta"; non-streaming uses
+                                        // "message". Support both for test/compat.
+                                        let null = Value::Null;
+                                        let source: &Value = choice
+                                            .get("delta")
+                                            .or_else(|| choice.get("message"))
+                                            .unwrap_or(&null);
+                                        let content = source["content"]
+                                            .as_str()
+                                            .filter(|s| !s.is_empty())
+                                            .map(str::to_owned);
+                                        let fc_val = source.get("function_call").cloned();
+                                        // Only yield when there is actual payload.
+                                        if content.is_some() || fc_val.is_some() {
+                                            let fc = fc_val.map(|v| {
+                                                FunctionCall::from_parts_unchecked(
+                                                    v["name"]
+                                                        .as_str()
+                                                        .unwrap_or("")
+                                                        .to_string(),
+                                                    v["arguments"]
+                                                        .as_str()
+                                                        .unwrap_or("")
+                                                        .to_string(),
+                                                )
+                                            });
+                                            yield Message::from_parts_unchecked(
+                                                MessageRole::Assistant,
+                                                content,
+                                                None,
+                                                fc,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }

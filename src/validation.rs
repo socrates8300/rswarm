@@ -150,7 +150,11 @@ pub struct BudgetEnforcer {
     pub total_tokens: u32,
     /// Cumulative tool calls made.
     pub tool_calls: u32,
-    /// Current agent-handoff nesting depth.
+    /// Cumulative number of agent handoffs performed so far in this run.
+    ///
+    /// This is a **monotonically increasing counter** — it is never decremented
+    /// because agent handoffs in the run loop are sequential (not recursive).
+    /// `RuntimeLimits::max_depth` limits the total number of handoffs allowed.
     pub depth: u32,
 }
 
@@ -195,7 +199,9 @@ impl BudgetEnforcer {
             }
         }
         if let Some(max_depth) = self.limits.max_depth {
-            if self.depth >= max_depth {
+            // Use `>` so that max_depth=1 permits exactly 1 handoff before
+            // blocking (depth is incremented *before* this check).
+            if self.depth > max_depth {
                 return Err(BudgetExhausted::MaxDepth {
                     depth: self.depth,
                     limit: max_depth,
@@ -328,4 +334,26 @@ pub fn validate_api_url(url: &str, config: &SwarmConfig) -> SwarmResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_max_depth_allows_exact_budget_then_exhausts() {
+        let mut budget = BudgetEnforcer::new(RuntimeLimits {
+            max_depth: Some(1),
+            ..RuntimeLimits::default()
+        });
+
+        assert!(budget.check().is_ok());
+        budget.increment_depth();
+        assert!(budget.check().is_ok());
+        budget.increment_depth();
+        assert!(matches!(
+            budget.check(),
+            Err(BudgetExhausted::MaxDepth { depth: 2, limit: 1 })
+        ));
+    }
 }

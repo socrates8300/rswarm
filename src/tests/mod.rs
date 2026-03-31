@@ -4,6 +4,7 @@ pub mod builder;
 pub mod initialization;
 pub mod integration;
 pub mod message;
+pub mod phase3;
 pub mod runtime_enforcement;
 pub mod stream;
 pub mod swarm_run;

@@ -58,7 +58,12 @@ fn compiled_injection_patterns() -> &'static Vec<(Regex, &'static str)> {
     CACHE.get_or_init(|| {
         INJECTION_PATTERNS
             .iter()
-            .filter_map(|(p, name)| Regex::new(p).ok().map(|r| (r, *name)))
+            .map(|(p, name)| {
+                (
+                    Regex::new(p).expect("static injection pattern must compile"),
+                    *name,
+                )
+            })
             .collect()
     })
 }
@@ -68,7 +73,12 @@ fn compiled_pii_patterns() -> &'static Vec<(Regex, &'static str)> {
     CACHE.get_or_init(|| {
         PII_PATTERNS
             .iter()
-            .filter_map(|(p, name)| Regex::new(p).ok().map(|r| (r, *name)))
+            .map(|(p, name)| {
+                (
+                    Regex::new(p).expect("static PII pattern must compile"),
+                    *name,
+                )
+            })
             .collect()
     })
 }

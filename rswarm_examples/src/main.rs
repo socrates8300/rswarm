@@ -3,7 +3,7 @@
 mod browse_docs;
 
 use anyhow::{Context, Result};
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use rswarm::types::AgentFunction;
 use rswarm::{Agent, Instructions, Swarm, ToolCallExecution};
 use std::future::Future;
@@ -23,17 +23,27 @@ async fn main() -> Result<()> {
     let prompt = read_prompt_file("prompt.txt")?;
 
     // Define the browse_docs function for agents
-    let browse_docs_function = AgentFunction {
-        name: "browse_docs".to_string(),
-        function: Arc::new(
+    let browse_docs_function = AgentFunction::new(
+        "browse_docs",
+        Arc::new(
             |args| -> Pin<
-                Box<dyn Future<Output = Result<rswarm::types::ResultType, anyhow::Error>> + Send>,
+                Box<
+                    dyn Future<
+                            Output = std::result::Result<
+                                rswarm::types::ResultType,
+                                rswarm::SwarmError,
+                            >,
+                        > + Send,
+                >,
             > {
-                Box::pin(async move { browse_rust_docs(args) })
+                Box::pin(async move {
+                    browse_rust_docs(args).map_err(|e| rswarm::SwarmError::Other(e.to_string()))
+                })
             },
         ),
-        accepts_context_variables: false,
-    };
+        false,
+    )
+    .expect("browse_docs function name is valid");
 
     // Initialize agents
     let agents = initialize_agents(&model, &prompt, browse_docs_function)?;

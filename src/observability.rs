@@ -10,13 +10,12 @@
 //!
 //! # Prometheus exporter (feature `metrics-export`)
 //!
-//! Enable with `--features metrics-export`. Call [`install_prometheus_recorder`]
+//! Enable with `--features metrics-export`. Call `install_prometheus_recorder()`
 //! once at process start. The recorder is global; repeated calls are a no-op.
 //!
 //! # OpenTelemetry (feature `otel`)
 //!
-//! Enable with `--features otel` and uncomment the optional deps in Cargo.toml.
-//! Call [`init_tracer`] once at process start; it reads
+//! Enable with `--features otel`. Call `init_tracer()` once at process start; it reads
 //! `OTEL_EXPORTER_OTLP_ENDPOINT` from the environment.
 
 // ---------------------------------------------------------------------------
@@ -142,25 +141,62 @@ impl Default for OtelConfig {
 
 /// Initialise the global OpenTelemetry tracer.
 ///
-/// Requires the `otel` feature and the optional deps in Cargo.toml to be
-/// uncommented. Returns `Ok(())` on success.
-///
-/// This is a stub until the `otel` feature's optional deps are activated.
+/// Installs an OTLP-backed OpenTelemetry layer for the global `tracing`
+/// subscriber. Repeated calls after a successful initialization are no-ops.
 #[cfg(feature = "otel")]
-pub fn init_tracer(_config: OtelConfig) -> crate::error::SwarmResult<()> {
-    // TODO: wire opentelemetry + opentelemetry-otlp once deps are uncommented
-    // Example (with deps active):
-    //
-    // use opentelemetry_otlp::WithExportConfig;
-    // let tracer = opentelemetry_otlp::new_pipeline()
-    //     .tracing()
-    //     .with_exporter(
-    //         opentelemetry_otlp::new_exporter()
-    //             .tonic()
-    //             .with_endpoint(config.endpoint.unwrap_or_default()),
-    //     )
-    //     .install_batch(opentelemetry_sdk::runtime::Tokio)?;
-    // tracing_opentelemetry::layer().with_tracer(tracer);
+pub fn init_tracer(config: OtelConfig) -> crate::error::SwarmResult<()> {
+    use std::sync::OnceLock;
+
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_otlp::WithExportConfig;
+    use tracing_opentelemetry::OpenTelemetryLayer;
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+    static INITIALIZED: OnceLock<()> = OnceLock::new();
+
+    if INITIALIZED.get().is_some() {
+        return Ok(());
+    }
+
+    let exporter_builder = opentelemetry_otlp::SpanExporter::builder().with_tonic();
+    let exporter = if let Some(endpoint) = config
+        .endpoint
+        .as_deref()
+        .filter(|endpoint| !endpoint.trim().is_empty())
+    {
+        exporter_builder.with_endpoint(endpoint.to_string()).build()
+    } else {
+        exporter_builder.build()
+    }
+    .map_err(|error| {
+        crate::error::SwarmError::ConfigError(format!(
+            "failed to build OTLP span exporter: {}",
+            error
+        ))
+    })?;
+
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_service_name(config.service_name.clone())
+                .build(),
+        )
+        .with_batch_exporter(exporter)
+        .build();
+    let tracer = provider.tracer(config.service_name);
+
+    tracing_subscriber::registry()
+        .with(OpenTelemetryLayer::new(tracer))
+        .try_init()
+        .map_err(|error| {
+            crate::error::SwarmError::ConfigError(format!(
+                "failed to install tracing subscriber: {}",
+                error
+            ))
+        })?;
+
+    opentelemetry::global::set_tracer_provider(provider);
+    let _ = INITIALIZED.set(());
     Ok(())
 }
 

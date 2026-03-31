@@ -14,7 +14,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -74,6 +74,26 @@ pub struct CircuitBreaker {
 }
 
 impl CircuitBreaker {
+    fn lock_state(&self) -> MutexGuard<'_, CircuitState> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                breaker = %self.name,
+                "circuit breaker state lock poisoned; continuing with recovered state"
+            );
+            poisoned.into_inner()
+        })
+    }
+
+    fn lock_failures(&self) -> MutexGuard<'_, u32> {
+        self.consecutive_failures.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                breaker = %self.name,
+                "circuit breaker failure-count lock poisoned; continuing with recovered state"
+            );
+            poisoned.into_inner()
+        })
+    }
+
     /// Create a new breaker in the `Closed` state.
     ///
     /// - `failure_threshold`: consecutive failures before opening.
@@ -98,7 +118,7 @@ impl CircuitBreaker {
     /// Automatically transitions `Open → HalfOpen` when the reset window
     /// has elapsed, so the next probe can be attempted.
     pub fn is_open(&self) -> bool {
-        let mut state = self.state.lock().expect("circuit_breaker lock poisoned");
+        let mut state = self.lock_state();
         if let CircuitState::Open { opened_at } = &*state {
             if opened_at.elapsed() >= self.reset_duration {
                 *state = CircuitState::HalfOpen;
@@ -112,10 +132,7 @@ impl CircuitBreaker {
 
     /// Snapshot the current state without side effects.
     pub fn state_snapshot(&self) -> CircuitStateSnapshot {
-        self.state
-            .lock()
-            .expect("circuit_breaker lock poisoned")
-            .snapshot()
+        self.lock_state().snapshot()
     }
 
     /// Record a successful call.
@@ -123,11 +140,8 @@ impl CircuitBreaker {
     /// - Resets the failure counter.
     /// - Transitions `HalfOpen → Closed`.
     pub fn record_success(&self) {
-        let mut state = self.state.lock().expect("circuit_breaker lock poisoned");
-        let mut failures = self
-            .consecutive_failures
-            .lock()
-            .expect("circuit_breaker lock poisoned");
+        let mut state = self.lock_state();
+        let mut failures = self.lock_failures();
         *failures = 0;
         if matches!(*state, CircuitState::HalfOpen) {
             *state = CircuitState::Closed;
@@ -141,11 +155,8 @@ impl CircuitBreaker {
     /// - Opens the breaker when the threshold is reached.
     /// - Immediately re-opens from `HalfOpen` on a probe failure.
     pub fn record_failure(&self) -> CircuitStateSnapshot {
-        let mut state = self.state.lock().expect("circuit_breaker lock poisoned");
-        let mut failures = self
-            .consecutive_failures
-            .lock()
-            .expect("circuit_breaker lock poisoned");
+        let mut state = self.lock_state();
+        let mut failures = self.lock_failures();
 
         match &*state {
             CircuitState::HalfOpen => {

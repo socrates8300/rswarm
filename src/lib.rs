@@ -5,8 +5,11 @@ pub mod types;
 pub mod util;
 pub mod validation;
 
+pub mod agent_comm;
+pub mod agent_registry;
 pub mod checkpoint;
 pub mod circuit_breaker;
+pub mod distribution;
 pub mod error;
 pub mod escalation;
 pub mod event;
@@ -16,13 +19,21 @@ pub mod observability;
 pub mod persistence;
 pub mod phase;
 pub mod provider;
+pub mod team;
 pub mod tool;
 
 #[cfg(test)]
 pub mod tests;
+pub use crate::agent_comm::{
+    AgentChannel, AgentMessage, ChannelRegistry, InProcessChannel, MessageId,
+};
+pub use crate::agent_registry::AgentRegistry;
 pub use crate::checkpoint::{CheckpointData, CheckpointEnvelope, CURRENT_CHECKPOINT_VERSION};
 pub use crate::circuit_breaker::{CircuitBreaker, CircuitStateSnapshot};
 pub use crate::core::Swarm;
+pub use crate::distribution::{
+    AgentAddress, DistributedMessage, DistributedTransport, HttpDistributedTransport,
+};
 pub use crate::error::{SwarmError, SwarmResult};
 pub use crate::escalation::{
     EscalationAction, EscalationConfig, EscalationDetector, EscalationTrigger,
@@ -49,14 +60,18 @@ pub use crate::phase::{
 pub use crate::provider::{
     Chunk, CompletionRequest, CompletionResponse, LlmProvider, OpenAiProvider,
 };
+pub use crate::team::{
+    AgentTeam, ConsensusStrategy, TeamAssignment, TeamDecision, TeamFormationPolicy, TeamRole,
+    TeamVote, VoteTally,
+};
 pub use crate::tool::{
     ClosureTool, InvocationArgs, Tool, ToolCallSpec, ToolError, ToolRegistry, ToolResult,
     ToolSchema,
 };
 pub use crate::types::RuntimeLimits;
 pub use crate::types::{
-    Agent, ContextVariables, FunctionCall, FunctionCallPolicy, Instructions, Message, MessageRole,
-    Response, SwarmConfig, ToolCallExecution,
+    Agent, AgentRef, ContextVariables, FunctionCall, FunctionCallPolicy, Instructions, Message,
+    MessageRole, Response, SwarmConfig, ToolCallExecution,
 };
 pub use crate::validation::{
     verify_structured_response, verify_tool_arguments, BudgetEnforcer, BudgetExhausted,

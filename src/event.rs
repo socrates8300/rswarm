@@ -1,7 +1,10 @@
+use crate::agent_comm::MessageId;
 use crate::circuit_breaker::CircuitStateSnapshot;
+use crate::distribution::AgentAddress;
 use crate::escalation::{EscalationAction, EscalationTrigger};
 use crate::guardrails::DataClassification;
 use crate::phase::{AgentLoopPhase, PhaseResult, TerminationReason};
+use crate::team::{AgentTeam, TeamDecision};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -150,6 +153,42 @@ pub enum AgentEvent {
         error_type: String,
         timestamp: DateTime<Utc>,
     },
+    #[serde(rename = "message_sent")]
+    MessageSent {
+        trace_id: TraceId,
+        from: AgentAddress,
+        to: AgentAddress,
+        message_id: MessageId,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "message_received")]
+    MessageReceived {
+        trace_id: TraceId,
+        by: AgentAddress,
+        message_id: MessageId,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "reply_timeout")]
+    ReplyTimeout {
+        trace_id: TraceId,
+        from: AgentAddress,
+        to: AgentAddress,
+        correlation_id: MessageId,
+        timeout_ms: u64,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "team_formed")]
+    TeamFormed {
+        trace_id: TraceId,
+        team: AgentTeam,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "consensus_reached")]
+    ConsensusReached {
+        trace_id: TraceId,
+        decision: TeamDecision,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 impl AgentEvent {
@@ -169,6 +208,11 @@ impl AgentEvent {
             Self::MemoryPersisted { trace_id, .. } => trace_id.as_str(),
             Self::LoopEnd { trace_id, .. } => trace_id.as_str(),
             Self::Error { trace_id, .. } => trace_id.as_str(),
+            Self::MessageSent { trace_id, .. } => trace_id.as_str(),
+            Self::MessageReceived { trace_id, .. } => trace_id.as_str(),
+            Self::ReplyTimeout { trace_id, .. } => trace_id.as_str(),
+            Self::TeamFormed { trace_id, .. } => trace_id.as_str(),
+            Self::ConsensusReached { trace_id, .. } => trace_id.as_str(),
         }
     }
 
@@ -188,6 +232,11 @@ impl AgentEvent {
             Self::MemoryPersisted { timestamp, .. } => *timestamp,
             Self::LoopEnd { timestamp, .. } => *timestamp,
             Self::Error { timestamp, .. } => *timestamp,
+            Self::MessageSent { timestamp, .. } => *timestamp,
+            Self::MessageReceived { timestamp, .. } => *timestamp,
+            Self::ReplyTimeout { timestamp, .. } => *timestamp,
+            Self::TeamFormed { timestamp, .. } => *timestamp,
+            Self::ConsensusReached { timestamp, .. } => *timestamp,
         }
     }
 }
@@ -241,6 +290,15 @@ impl fmt::Display for AgentEvent {
             } => write!(f, "LoopEnd({}, {} iters)", agent_name, iterations),
             Self::Error { message, .. } => {
                 write!(f, "Error({})", crate::util::safe_truncate(message, 200))
+            }
+            Self::MessageSent { from, to, .. } => write!(f, "MessageSent({} → {})", from, to),
+            Self::MessageReceived { by, .. } => write!(f, "MessageReceived({})", by),
+            Self::ReplyTimeout { from, to, .. } => write!(f, "ReplyTimeout({} → {})", from, to),
+            Self::TeamFormed { team, .. } => {
+                write!(f, "TeamFormed(assignments={})", team.assignments().len())
+            }
+            Self::ConsensusReached { decision, .. } => {
+                write!(f, "ConsensusReached({})", decision.selected_option())
             }
         }
     }

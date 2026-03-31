@@ -30,31 +30,38 @@ pub struct SqliteVssMemory {
     inner: InMemoryVectorStore,
     #[allow(dead_code)]
     db_path: Option<String>,
+    persistent: bool,
 }
 
 impl SqliteVssMemory {
     /// Create a persistent store at `db_path`.
     ///
-    /// Without the `sqlite-vec` feature this silently uses an in-memory store.
+    /// **Important:** Without the `sqlite-vec` feature this falls back to an
+    /// in-memory store — **all writes are lost on process exit**.  Enable the
+    /// real adapter before relying on this API for durable storage.
     pub fn open(db_path: impl Into<String>) -> SwarmResult<Self> {
         let path = db_path.into();
         #[cfg(feature = "sqlite-vec")]
         {
-            // TODO: open SQLite at `path`, load vec extension, create virtual table.
-            // let conn = rusqlite::Connection::open(&path)?;
-            // conn.load_extension("sqlite_vec", None)?;
-            // conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0(...)", [])?;
-            let _ = &path;
+            Err(crate::error::SwarmError::ConfigError(format!(
+                "sqlite-vec support for '{}' is not implemented yet; \
+                 use SqliteVssMemory::in_memory() or disable the feature",
+                path
+            )))
         }
         #[cfg(not(feature = "sqlite-vec"))]
-        tracing::debug!(
-            "sqlite-vec feature disabled; SqliteVssMemory at '{}' falling back to in-memory store",
-            path
-        );
-        Ok(Self {
-            inner: InMemoryVectorStore::new(),
-            db_path: Some(path),
-        })
+        {
+            tracing::warn!(
+                "sqlite-vec feature disabled; SqliteVssMemory at '{}' will NOT persist data \
+                 — all writes are lost on process exit",
+                path
+            );
+            Ok(Self {
+                inner: InMemoryVectorStore::new(),
+                db_path: Some(path),
+                persistent: false,
+            })
+        }
     }
 
     /// Create an in-memory store (no path persistence).
@@ -62,7 +69,16 @@ impl SqliteVssMemory {
         Self {
             inner: InMemoryVectorStore::new(),
             db_path: None,
+            persistent: false,
         }
+    }
+
+    /// Returns `true` if this store was opened with the `sqlite-vec` feature
+    /// enabled and is actually persisting data to disk.
+    ///
+    /// When `false`, all writes are in-memory only and will be lost on exit.
+    pub fn is_persistent(&self) -> bool {
+        self.persistent
     }
 }
 
@@ -117,5 +133,22 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "a");
+    }
+
+    #[cfg(not(feature = "sqlite-vec"))]
+    #[test]
+    fn test_open_reports_non_persistent_fallback() {
+        let store = SqliteVssMemory::open("memory.db").expect("fallback store");
+        assert!(!store.is_persistent());
+    }
+
+    #[cfg(feature = "sqlite-vec")]
+    #[test]
+    fn test_open_returns_error_until_backend_is_implemented() {
+        let error = match SqliteVssMemory::open("memory.db") {
+            Ok(_) => panic!("feature path is not implemented"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("not implemented yet"));
     }
 }

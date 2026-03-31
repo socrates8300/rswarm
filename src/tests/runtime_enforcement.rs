@@ -102,7 +102,9 @@ mod tests {
         let swarm = Swarm::builder()
             .with_api_key("sk-test".to_string())
             .with_runtime_limits(RuntimeLimits {
-                max_tokens_per_request: Some(10),
+                // Content-aware estimate: "hello" ≈ 1 token (5 chars / 4).
+                // Limit of 0 is always exceeded, verifying enforcement fires.
+                max_tokens_per_request: Some(0),
                 ..RuntimeLimits::default()
             })
             .with_subscriber(collector.clone())
@@ -321,6 +323,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_repeated_tool_failure_escalation_stop_returns_termination_reason() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(mock_chat_response(json!({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "explode",
+                            "arguments": {}
+                        }
+                    }]
+                }))),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let collector = CollectingSubscriber::new();
+        let agent = failing_function_agent();
+        let swarm = Swarm::builder()
+            .with_api_key("sk-test".to_string())
+            .with_api_url(mock_server.uri())
+            .with_agent(agent.clone())
+            .with_subscriber(collector.clone())
+            .with_escalation_config(EscalationConfig {
+                repeated_failure_threshold: 1,
+                action: EscalationAction::Stop,
+                ..EscalationConfig::default()
+            })
+            .build()
+            .expect("swarm");
+
+        let response = swarm
+            .run(
+                agent,
+                vec![Message::user("hello").expect("message")],
+                ContextVariables::new(),
+                None,
+                false,
+                false,
+                1,
+            )
+            .await
+            .expect("run should terminate instead of bubbling the tool error");
+
+        assert!(matches!(
+            response.termination_reason,
+            Some(crate::phase::TerminationReason::DoomLoopDetected)
+        ));
+        assert!(collector
+            .collected()
+            .iter()
+            .any(|event| matches!(event, AgentEvent::EscalationTriggered { .. })));
+    }
+
+    #[tokio::test]
     async fn test_tool_breaker_opens_after_failure() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -385,6 +445,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_streaming_run_accumulates_fragmented_sse_content() {
+        let mock_server = MockServer::start().await;
+        let body = concat!(
+            "data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n",
+            "data: {\"id\":\"chunk-2\",\"object\":\"chat.completion.chunk\",\"created\":0,\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n",
+            "data: [DONE]\n"
+        );
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+            .mount(&mock_server)
+            .await;
+
+        let agent = text_agent("streaming");
+        let swarm = Swarm::builder()
+            .with_api_key("sk-test".to_string())
+            .with_api_url(mock_server.uri())
+            .with_agent(agent.clone())
+            .build()
+            .expect("swarm");
+
+        let response = swarm
+            .run(
+                agent,
+                vec![Message::user("hello").expect("message")],
+                ContextVariables::new(),
+                None,
+                true,
+                false,
+                1,
+            )
+            .await
+            .expect("streamed run");
+
+        assert_eq!(
+            response.messages.last().and_then(Message::content),
+            Some("Hello world")
+        );
+    }
+
+    #[tokio::test]
     async fn test_sqlite_persistence_backend_records_session_events_and_messages() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -437,5 +538,53 @@ mod tests {
             .iter()
             .any(|event| matches!(event, AgentEvent::LoopEnd { .. })));
         assert!(!persisted_memory.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_xml_only_instructions_execute_with_fallback_system_prompt() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(mock_chat_response(json!({
+                    "role": "assistant",
+                    "content": "step completed"
+                }))),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let agent = Agent::new(
+            "step-agent",
+            "gpt-4",
+            Instructions::Text(
+                "<steps><step number=\"1\" action=\"run_once\"><prompt>Say hello</prompt></step></steps>"
+                    .to_string(),
+            ),
+        )
+        .expect("agent");
+        let swarm = Swarm::builder()
+            .with_api_key("sk-test".to_string())
+            .with_api_url(mock_server.uri())
+            .with_agent(agent.clone())
+            .build()
+            .expect("swarm");
+
+        let response = swarm
+            .run(
+                agent,
+                vec![Message::user("hello").expect("message")],
+                ContextVariables::new(),
+                None,
+                false,
+                false,
+                1,
+            )
+            .await
+            .expect("XML-only instructions should execute");
+
+        assert_eq!(
+            response.messages.last().and_then(Message::content),
+            Some("step completed")
+        );
     }
 }

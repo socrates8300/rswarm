@@ -26,7 +26,26 @@ pub struct PostgresStore {
 }
 
 impl PostgresStore {
+    /// Connect to a PostgreSQL database **without TLS** (`NoTls`).
+    ///
+    /// This is suitable only for Unix-socket connections or `localhost`-only
+    /// deployments where the transport is already secured by the OS.  For any
+    /// connection that crosses a network boundary you **must** provide a TLS
+    /// connector; see `connect_tls` (planned) or upstream `tokio-postgres` docs.
     pub async fn connect(connection_string: &str) -> SwarmResult<Self> {
+        // Warn loudly when the connection string does not look local, because
+        // NoTls over a real network sends credentials in the clear.
+        let looks_remote = !connection_string.contains("localhost")
+            && !connection_string.contains("127.0.0.1")
+            && !connection_string.starts_with('/');
+        if looks_remote {
+            tracing::warn!(
+                "PostgresStore::connect is using NoTls but the connection string \
+                 does not appear to be localhost/Unix-socket. Credentials will be \
+                 transmitted in plaintext. Use a TLS-capable connector for remote hosts."
+            );
+        }
+
         let (client, connection) = tokio_postgres::connect(connection_string, NoTls)
             .await
             .map_err(pg_err)?;

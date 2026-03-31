@@ -6,9 +6,14 @@
    calls are now asynchronous and are awaited without blocking the runtime.
 */
 
+use crate::agent_comm::{AgentMessage, ChannelRegistry, InProcessChannel};
+use crate::agent_registry::AgentRegistry;
 use crate::checkpoint::{CheckpointData, CheckpointEnvelope};
 use crate::circuit_breaker::{CircuitBreaker, CircuitStateSnapshot};
 use crate::constants::{CTX_VARS_NAME, MAX_REQUEST_TIMEOUT, MIN_REQUEST_TIMEOUT};
+use crate::distribution::{
+    AgentAddress, DistributedMessage, DistributedTransport, HttpDistributedTransport,
+};
 use crate::error::{SwarmError, SwarmResult};
 use crate::escalation::{
     EscalationAction, EscalationConfig, EscalationDetector, EscalationTrigger,
@@ -27,11 +32,16 @@ use crate::persistence::{
 };
 use crate::phase::TokenUsage;
 use crate::provider::{CompletionRequest, LlmProvider, OpenAiProvider};
+use crate::team::{
+    AgentTeam, ConsensusStrategy, TeamAssignment, TeamDecision, TeamFormationPolicy, TeamRole,
+    TeamVote, VoteTally,
+};
 use crate::tool::InvocationArgs;
 use crate::types::{
-    Agent, AgentFunction, ApiKey, ApiUrl, ChatCompletionResponse, ContextVariables, FunctionCall,
-    FunctionCallPolicy, Instructions, Message, ModelId, OpenAIErrorResponse, Response, ResultType,
-    RuntimeLimits, Step, Steps, SwarmConfig,
+    Agent, AgentFunction, AgentRef, ApiKey, ApiUrl, ChatCompletionResponse, Choice,
+    ContextVariables, FinishReason, FunctionCall, FunctionCallPolicy, Instructions, Message,
+    MessageRole, ModelId, OpenAIErrorResponse, Response, ResultType, RuntimeLimits, Step, Steps,
+    SwarmConfig,
 };
 use crate::util::{debug_print, extract_xml_steps, function_to_json, parse_steps_from_xml};
 use crate::validation::{
@@ -41,7 +51,7 @@ use chrono::Utc;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -108,22 +118,16 @@ fn max_classification(
     }
 }
 
-impl Default for Swarm {
-    fn default() -> Self {
-        // SAFETY: None/empty arguments use only hardcoded default constants that are
-        // proven valid by SwarmConfig::default(). This can only fail if OPENAI_API_KEY
-        // is unset, in which case the panic is intentional and gives a clear message.
-        Swarm::new(None, None, HashMap::new()).expect("Default initialization should never fail")
-    }
-}
-
 /// Main struct for managing AI agent interactions and chat completions.
 pub struct Swarm {
     client: Client,
     api_key: ApiKey,
     agent_registry: HashMap<String, Agent>,
+    agent_directory: AgentRegistry,
+    channel_registry: Arc<ChannelRegistry>,
     config: SwarmConfig,
     provider: Arc<dyn LlmProvider>,
+    distributed_transport: Arc<dyn DistributedTransport>,
     subscribers: Vec<Arc<dyn EventSubscriber>>,
     session_store: Option<Arc<dyn SessionStore>>,
     event_store: Option<Arc<dyn EventStore>>,
@@ -139,6 +143,7 @@ pub struct Swarm {
     provider_breaker: CircuitBreaker,
     tool_breaker_settings: CircuitBreakerSettings,
     tool_breakers: Arc<Mutex<HashMap<String, CircuitBreaker>>>,
+    team_assignment_load: Arc<Mutex<HashMap<AgentRef, u64>>>,
 }
 
 /// Builder pattern implementation for creating Swarm instances.
@@ -146,6 +151,7 @@ pub struct SwarmBuilder {
     client: Option<Client>,
     api_key: Option<ApiKey>,
     agents: HashMap<String, Agent>,
+    distributed_transport: Option<Arc<dyn DistributedTransport>>,
     config: SwarmConfig,
     build_error: Option<SwarmError>,
     subscribers: Vec<Arc<dyn EventSubscriber>>,
@@ -169,6 +175,7 @@ impl SwarmBuilder {
             client: None,
             api_key: None,
             agents: HashMap::new(),
+            distributed_transport: None,
             config,
             build_error: None,
             subscribers: Vec::new(),
@@ -294,6 +301,11 @@ impl SwarmBuilder {
         self
     }
 
+    pub fn with_distributed_transport(mut self, transport: Arc<dyn DistributedTransport>) -> Self {
+        self.distributed_transport = Some(transport);
+        self
+    }
+
     pub fn with_api_key(mut self, api_key: String) -> Self {
         match ApiKey::new(api_key) {
             Ok(api_key) => self.api_key = Some(api_key),
@@ -408,13 +420,24 @@ impl SwarmBuilder {
             api_key.as_str(),
             self.config.api_url(),
         ));
+        let distributed_transport = self
+            .distributed_transport
+            .unwrap_or_else(|| Arc::new(HttpDistributedTransport::new(client.clone())));
+        let agent_directory = AgentRegistry::new();
+        for agent in self.agents.values() {
+            agent_directory.register(Arc::new(agent.clone()));
+        }
+        let channel_registry = ChannelRegistry::new();
 
         Ok(Swarm {
             client,
             api_key,
             agent_registry: self.agents,
+            agent_directory,
+            channel_registry,
             config: self.config,
             provider,
+            distributed_transport,
             subscribers: self.subscribers,
             session_store: self.session_store,
             event_store: self.event_store,
@@ -432,6 +455,7 @@ impl SwarmBuilder {
             ),
             tool_breaker_settings: self.tool_breaker_settings,
             tool_breakers: Arc::new(Mutex::new(HashMap::new())),
+            team_assignment_load: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -451,6 +475,10 @@ impl Default for SwarmBuilder {
 impl Swarm {
     pub fn builder() -> SwarmBuilder {
         SwarmBuilder::new()
+    }
+
+    fn next_trace_id() -> TraceId {
+        TraceId::from(uuid::Uuid::new_v4().to_string())
     }
 
     // For backward compatibility.
@@ -484,12 +512,448 @@ impl Swarm {
         &self.agent_registry
     }
 
+    pub fn agent_directory(&self) -> &AgentRegistry {
+        &self.agent_directory
+    }
+
+    pub fn channel_registry(&self) -> &Arc<ChannelRegistry> {
+        &self.channel_registry
+    }
+
     pub fn config(&self) -> &SwarmConfig {
         &self.config
     }
 
     pub fn provider(&self) -> &Arc<dyn LlmProvider> {
         &self.provider
+    }
+
+    pub fn find_agents_by_capability(&self, capability: &str) -> Vec<AgentRef> {
+        self.agent_directory.find_by_capability(capability)
+    }
+
+    pub async fn open_agent_channel(
+        &self,
+        agent: impl Into<AgentRef>,
+    ) -> SwarmResult<InProcessChannel> {
+        let agent = agent.into();
+        if self.agent_directory.get(&agent).is_none() {
+            return Err(SwarmError::AgentNotFoundError(agent.to_string()));
+        }
+        InProcessChannel::new(agent, self.channel_registry.clone()).await
+    }
+
+    async fn emit_message_sent(
+        &self,
+        trace_id: &TraceId,
+        from: AgentAddress,
+        to: AgentAddress,
+        message_id: crate::agent_comm::MessageId,
+    ) {
+        self.emit(AgentEvent::MessageSent {
+            trace_id: trace_id.clone(),
+            from,
+            to,
+            message_id,
+            timestamp: Utc::now(),
+        })
+        .await;
+    }
+
+    async fn emit_message_received(
+        &self,
+        trace_id: &TraceId,
+        by: AgentAddress,
+        message_id: crate::agent_comm::MessageId,
+    ) {
+        self.emit(AgentEvent::MessageReceived {
+            trace_id: trace_id.clone(),
+            by,
+            message_id,
+            timestamp: Utc::now(),
+        })
+        .await;
+    }
+
+    async fn emit_reply_timeout(
+        &self,
+        trace_id: &TraceId,
+        from: AgentAddress,
+        to: AgentAddress,
+        correlation_id: crate::agent_comm::MessageId,
+        timeout: Duration,
+    ) {
+        self.emit(AgentEvent::ReplyTimeout {
+            trace_id: trace_id.clone(),
+            from,
+            to,
+            correlation_id,
+            timeout_ms: timeout.as_millis() as u64,
+            timestamp: Utc::now(),
+        })
+        .await;
+    }
+
+    fn validate_local_agent(&self, agent: &AgentRef) -> SwarmResult<()> {
+        if self.agent_directory.get(agent).is_some() {
+            Ok(())
+        } else {
+            Err(SwarmError::AgentNotFoundError(agent.to_string()))
+        }
+    }
+
+    fn local_message_from_distributed(message: &DistributedMessage) -> SwarmResult<AgentMessage> {
+        let (AgentAddress::Local { agent: from }, AgentAddress::Local { agent: to }) =
+            (&message.from, &message.to)
+        else {
+            return Err(SwarmError::ValidationError(
+                "Local message routing requires local source and destination".to_string(),
+            ));
+        };
+
+        Ok(AgentMessage {
+            id: message.id.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            payload: message.payload.clone(),
+            timestamp: message.timestamp,
+            correlation_id: message.correlation_id.clone(),
+            is_reply: message.is_reply,
+        })
+    }
+
+    pub async fn send_agent_message(
+        &self,
+        trace_id: Option<TraceId>,
+        from: AgentAddress,
+        to: AgentAddress,
+        payload: Value,
+    ) -> SwarmResult<crate::agent_comm::MessageId> {
+        let trace_id = trace_id.unwrap_or_else(Self::next_trace_id);
+        let message = DistributedMessage::new(from.clone(), to.clone(), payload)
+            .with_trace_id(trace_id.clone());
+
+        match (&from, &to) {
+            (
+                AgentAddress::Local { agent: local_from },
+                AgentAddress::Local { agent: local_to },
+            ) => {
+                self.validate_local_agent(local_from)?;
+                self.validate_local_agent(local_to)?;
+                self.channel_registry
+                    .send(Self::local_message_from_distributed(&message)?)
+                    .await?;
+            }
+            _ => {
+                self.distributed_transport.send(message.clone()).await?;
+            }
+        }
+
+        self.emit_message_sent(&trace_id, from, to, message.id.clone())
+            .await;
+        Ok(message.id)
+    }
+
+    pub async fn request_agent_message(
+        &self,
+        trace_id: Option<TraceId>,
+        from: AgentAddress,
+        to: AgentAddress,
+        payload: Value,
+        timeout: Duration,
+    ) -> SwarmResult<DistributedMessage> {
+        let trace_id = trace_id.unwrap_or_else(Self::next_trace_id);
+        let message = DistributedMessage::new(from.clone(), to.clone(), payload)
+            .with_trace_id(trace_id.clone());
+
+        let result = match (&from, &to) {
+            (
+                AgentAddress::Local { agent: local_from },
+                AgentAddress::Local { agent: local_to },
+            ) => {
+                self.validate_local_agent(local_from)?;
+                self.validate_local_agent(local_to)?;
+                self.channel_registry
+                    .request(Self::local_message_from_distributed(&message)?, timeout)
+                    .await
+                    .map(|reply| DistributedMessage {
+                        id: reply.id,
+                        from: AgentAddress::local(reply.from),
+                        to: AgentAddress::local(reply.to),
+                        payload: reply.payload,
+                        timestamp: reply.timestamp,
+                        correlation_id: reply.correlation_id,
+                        trace_id: Some(trace_id.clone()),
+                        is_reply: reply.is_reply,
+                    })
+            }
+            _ => {
+                self.distributed_transport
+                    .request(message.clone(), timeout)
+                    .await
+            }
+        };
+
+        match result {
+            Ok(reply) => {
+                self.emit_message_sent(&trace_id, from, to, message.id.clone())
+                    .await;
+                self.emit_message_received(&trace_id, reply.to.clone(), reply.id.clone())
+                    .await;
+                Ok(reply)
+            }
+            Err(err) => {
+                if matches!(err, SwarmError::TimeoutError(_)) {
+                    self.emit_message_sent(&trace_id, from.clone(), to.clone(), message.id.clone())
+                        .await;
+                    self.emit_reply_timeout(&trace_id, from, to, message.id.clone(), timeout)
+                        .await;
+                }
+                Err(err)
+            }
+        }
+    }
+
+    pub async fn multicast_agent_message(
+        &self,
+        trace_id: Option<TraceId>,
+        from: AgentAddress,
+        recipients: Vec<AgentAddress>,
+        payload: Value,
+    ) -> SwarmResult<Vec<crate::agent_comm::MessageId>> {
+        let trace_id = trace_id.unwrap_or_else(Self::next_trace_id);
+        let mut ids = Vec::new();
+        for recipient in recipients {
+            let message_id = self
+                .send_agent_message(
+                    Some(trace_id.clone()),
+                    from.clone(),
+                    recipient,
+                    payload.clone(),
+                )
+                .await?;
+            ids.push(message_id);
+        }
+        Ok(ids)
+    }
+
+    pub async fn broadcast_agent_message(
+        &self,
+        trace_id: Option<TraceId>,
+        from: AgentAddress,
+        payload: Value,
+        include_sender: bool,
+    ) -> SwarmResult<Vec<crate::agent_comm::MessageId>> {
+        let sender_ref = from.agent_ref().clone();
+        let recipients = self
+            .agent_directory
+            .all_refs()
+            .into_iter()
+            .filter(|agent| include_sender || *agent != sender_ref)
+            .map(AgentAddress::local)
+            .collect::<Vec<_>>();
+        self.multicast_agent_message(trace_id, from, recipients, payload)
+            .await
+    }
+
+    fn agent_matches_role(agent: &Agent, role: &TeamRole) -> bool {
+        role.required_capabilities()
+            .iter()
+            .all(|capability| agent.has_capability(capability))
+    }
+
+    fn optional_capability_score(agent: &Agent, role: &TeamRole) -> usize {
+        role.optional_capabilities()
+            .iter()
+            .filter(|capability| agent.has_capability(capability))
+            .count()
+    }
+
+    async fn form_team_internal(
+        &self,
+        existing: Option<&AgentTeam>,
+        roles: &[TeamRole],
+        policy: TeamFormationPolicy,
+    ) -> SwarmResult<AgentTeam> {
+        if roles.is_empty() {
+            return Err(SwarmError::ValidationError(
+                "At least one team role is required".to_string(),
+            ));
+        }
+
+        let load_snapshot = self
+            .team_assignment_load
+            .lock()
+            .map_err(|_| SwarmError::Other("team_assignment_load lock poisoned".into()))?
+            .clone();
+        let mut projected_load = load_snapshot;
+        let mut used = HashSet::new();
+        let mut assignments = Vec::with_capacity(roles.len());
+        let mut all_refs = self.agent_directory.all_refs();
+        all_refs.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        for role in roles {
+            if policy.prefer_existing_assignments {
+                if let Some(existing_team) = existing {
+                    if let Some(existing_agent) = existing_team.agent_for_role(role.name()) {
+                        if let Some(agent) = self.agent_directory.get(existing_agent) {
+                            if Self::agent_matches_role(&agent, role)
+                                && (policy.allow_agent_reuse || used.insert(existing_agent.clone()))
+                            {
+                                *projected_load.entry(existing_agent.clone()).or_default() += 1;
+                                assignments.push(TeamAssignment::new(
+                                    role.clone(),
+                                    existing_agent.clone(),
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut candidates = all_refs
+                .iter()
+                .filter(|agent_ref| policy.allow_agent_reuse || !used.contains(*agent_ref))
+                .filter_map(|agent_ref| {
+                    self.agent_directory
+                        .get(agent_ref)
+                        .map(|agent| (agent_ref.clone(), agent))
+                })
+                .filter(|(_, agent)| Self::agent_matches_role(agent, role))
+                .collect::<Vec<_>>();
+
+            candidates.sort_by(|(left_ref, left_agent), (right_ref, right_agent)| {
+                let left_optional = Self::optional_capability_score(left_agent, role);
+                let right_optional = Self::optional_capability_score(right_agent, role);
+                right_optional
+                    .cmp(&left_optional)
+                    .then_with(|| {
+                        projected_load
+                            .get(left_ref)
+                            .copied()
+                            .unwrap_or(0)
+                            .cmp(&projected_load.get(right_ref).copied().unwrap_or(0))
+                    })
+                    .then_with(|| left_ref.as_str().cmp(right_ref.as_str()))
+            });
+
+            let Some((selected_ref, _)) = candidates.into_iter().next() else {
+                return Err(SwarmError::AgentNotFoundError(format!(
+                    "No registered agent satisfies role '{}' with capabilities {:?}",
+                    role.name(),
+                    role.required_capabilities()
+                )));
+            };
+
+            if !policy.allow_agent_reuse {
+                used.insert(selected_ref.clone());
+            }
+            *projected_load.entry(selected_ref.clone()).or_default() += 1;
+            assignments.push(TeamAssignment::new(role.clone(), selected_ref));
+        }
+
+        let team = AgentTeam::new(assignments)?;
+        {
+            let mut load = self
+                .team_assignment_load
+                .lock()
+                .map_err(|_| SwarmError::Other("team_assignment_load lock poisoned".into()))?;
+            *load = projected_load;
+        }
+        self.emit(AgentEvent::TeamFormed {
+            trace_id: Self::next_trace_id(),
+            team: team.clone(),
+            timestamp: Utc::now(),
+        })
+        .await;
+        Ok(team)
+    }
+
+    pub async fn form_team(&self, roles: &[TeamRole]) -> SwarmResult<AgentTeam> {
+        self.form_team_internal(None, roles, TeamFormationPolicy::default())
+            .await
+    }
+
+    pub async fn form_team_with_policy(
+        &self,
+        roles: &[TeamRole],
+        policy: TeamFormationPolicy,
+    ) -> SwarmResult<AgentTeam> {
+        self.form_team_internal(None, roles, policy).await
+    }
+
+    pub async fn reconfigure_team(
+        &self,
+        existing: &AgentTeam,
+        roles: &[TeamRole],
+        policy: TeamFormationPolicy,
+    ) -> SwarmResult<AgentTeam> {
+        self.form_team_internal(Some(existing), roles, policy).await
+    }
+
+    pub async fn reach_consensus(
+        &self,
+        votes: &[TeamVote],
+        strategy: ConsensusStrategy,
+    ) -> SwarmResult<TeamDecision> {
+        if votes.is_empty() {
+            return Err(SwarmError::ValidationError(
+                "At least one team vote is required".to_string(),
+            ));
+        }
+
+        let mut tallies = HashMap::<String, u32>::new();
+        for vote in votes {
+            self.validate_local_agent(vote.agent())?;
+            *tallies.entry(vote.option().to_string()).or_default() += vote.weight();
+        }
+
+        let total_votes = tallies.values().copied().sum::<u32>();
+        let mut tallies = tallies
+            .into_iter()
+            .map(|(option, weight)| VoteTally::new(option, weight))
+            .collect::<Vec<_>>();
+        tallies.sort_by(|left, right| {
+            right
+                .weight()
+                .cmp(&left.weight())
+                .then_with(|| left.option().cmp(right.option()))
+        });
+
+        let selected = tallies.first().ok_or_else(|| {
+            SwarmError::Other("Consensus tally was unexpectedly empty".to_string())
+        })?;
+        let unanimous = tallies.len() == 1;
+
+        match strategy {
+            ConsensusStrategy::Majority if selected.weight() * 2 <= total_votes => {
+                return Err(SwarmError::Other(
+                    "Majority consensus was not reached".to_string(),
+                ));
+            }
+            ConsensusStrategy::Unanimous if !unanimous => {
+                return Err(SwarmError::Other(
+                    "Unanimous consensus was not reached".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        let decision = TeamDecision::new(
+            strategy,
+            selected.option().to_string(),
+            total_votes,
+            tallies,
+            unanimous,
+        );
+        self.emit(AgentEvent::ConsensusReached {
+            trace_id: Self::next_trace_id(),
+            decision: decision.clone(),
+            timestamp: Utc::now(),
+        })
+        .await;
+        Ok(decision)
     }
 
     /// Emit an event to all registered subscribers.
@@ -550,12 +1014,12 @@ impl Swarm {
         }
     }
 
-    fn get_tool_breaker(&self, tool_name: &str) -> CircuitBreaker {
+    fn get_tool_breaker(&self, tool_name: &str) -> SwarmResult<CircuitBreaker> {
         let mut guard = self
             .tool_breakers
             .lock()
-            .expect("tool_breakers lock poisoned");
-        guard
+            .map_err(|_| SwarmError::Other("tool_breakers lock poisoned".into()))?;
+        Ok(guard
             .entry(tool_name.to_string())
             .or_insert_with(|| {
                 CircuitBreaker::new(
@@ -564,7 +1028,7 @@ impl Swarm {
                     self.tool_breaker_settings.reset_secs,
                 )
             })
-            .clone()
+            .clone())
     }
 
     async fn emit_guardrail_event(
@@ -893,34 +1357,90 @@ impl Swarm {
             }
 
             let mut stream = response.bytes_stream();
-            let mut full_response = ChatCompletionResponse::accumulator();
 
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(data) => {
-                        let text = String::from_utf8_lossy(&data);
-                        for line in text.lines() {
-                            if let Some(stripped) = line.strip_prefix("data: ") {
-                                let json_str = stripped.trim();
-                                if json_str == "[DONE]" {
-                                    break;
+            // Line buffer: TCP chunks can split SSE `data:` lines across boundaries.
+            let mut line_buf = String::new();
+            // Delta accumulators for the single choice we're building.
+            let mut content_buf = String::new();
+            let mut fc_name = String::new();
+            let mut fc_args = String::new();
+            let mut finish_reason: Option<FinishReason> = None;
+
+            'sse: while let Some(chunk_result) = stream.next().await {
+                let data = chunk_result.map_err(|e| {
+                    SwarmError::StreamError(format!("Error reading streaming response: {}", e))
+                })?;
+                line_buf.push_str(&String::from_utf8_lossy(&data));
+
+                // Process every complete line (terminated by \n).
+                while let Some(newline_pos) = line_buf.find('\n') {
+                    let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
+                    line_buf.drain(..=newline_pos);
+
+                    if let Some(json_str) = line.strip_prefix("data: ") {
+                        let json_str = json_str.trim();
+                        if json_str == "[DONE]" {
+                            break 'sse;
+                        }
+                        let chunk: Value = serde_json::from_str(json_str).map_err(|e| {
+                            SwarmError::DeserializationError(format!(
+                                "Failed to parse SSE chunk: {}",
+                                e
+                            ))
+                        })?;
+                        if let Some(choices) = chunk["choices"].as_array() {
+                            for choice in choices {
+                                let delta = &choice["delta"];
+                                if let Some(text) = delta["content"].as_str() {
+                                    content_buf.push_str(text);
                                 }
-                                let partial_response: serde_json::Result<ChatCompletionResponse> =
-                                    serde_json::from_str(json_str);
-                                if let Ok(partial) = partial_response {
-                                    full_response.extend_choices(partial.into_choices());
+                                if let Some(fc) = delta.get("function_call") {
+                                    if let Some(name) = fc["name"].as_str() {
+                                        fc_name.push_str(name);
+                                    }
+                                    if let Some(args) = fc["arguments"].as_str() {
+                                        fc_args.push_str(args);
+                                    }
+                                }
+                                if let Some(fr) = choice["finish_reason"].as_str() {
+                                    finish_reason = Some(match fr {
+                                        "stop" => FinishReason::Stop,
+                                        "length" => FinishReason::Length,
+                                        "content_filter" => FinishReason::ContentFilter,
+                                        "tool_calls" => FinishReason::ToolCalls,
+                                        "function_call" => FinishReason::FunctionCall,
+                                        other => FinishReason::Unknown(other.to_string()),
+                                    });
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        return Err(SwarmError::StreamError(format!(
-                            "Error reading streaming response: {}",
-                            e
-                        )))
-                    }
                 }
             }
+
+            // Assemble the fully merged message from accumulated deltas.
+            let merged_fc = if !fc_name.is_empty() || !fc_args.is_empty() {
+                Some(FunctionCall::from_parts_unchecked(fc_name, fc_args))
+            } else {
+                None
+            };
+            let merged_content = if !content_buf.is_empty() {
+                Some(content_buf)
+            } else {
+                None
+            };
+            let merged_message = Message::from_parts_unchecked(
+                MessageRole::Assistant,
+                merged_content,
+                None,
+                merged_fc,
+            );
+            let mut full_response = ChatCompletionResponse::accumulator();
+            full_response.extend_choices(vec![Choice {
+                index: 0,
+                message: merged_message,
+                finish_reason,
+            }]);
             Ok(full_response)
         } else {
             // Non-streaming path: delegate to provider, then map response via JSON round-trip.
@@ -956,11 +1476,14 @@ impl Swarm {
                         if let Some(first) = tool_calls.first() {
                             let name = first["function"]["name"].clone();
                             let args = first["function"]["arguments"].clone();
-                            let args_str = if args.is_string() {
-                                args.clone()
-                            } else {
-                                Value::String(serde_json::to_string(&args).unwrap_or_default())
-                            };
+                            let args_str =
+                                if args.is_string() {
+                                    args.clone()
+                                } else {
+                                    Value::String(serde_json::to_string(&args).map_err(|e| {
+                                        SwarmError::DeserializationError(e.to_string())
+                                    })?)
+                                };
                             choice["message"]["function_call"] =
                                 json!({"name": name, "arguments": args_str});
                         }
@@ -1125,7 +1648,12 @@ impl Swarm {
             .as_deref()
             .unwrap_or(state.agent.model())
             .to_string();
-        let prompt_tokens = (state.history.len() * 50) as u32;
+        // Heuristic: ~4 bytes per token. Actual counts come from the API response.
+        let prompt_tokens: u32 = state
+            .history
+            .iter()
+            .map(|m| m.content().map(|c| (c.len() / 4) as u32).unwrap_or(4))
+            .sum();
         if let Some(limit) = self.config.runtime_limits().max_tokens_per_request {
             if prompt_tokens > limit {
                 let exhausted = BudgetExhausted::TokensPerRequest {
@@ -1332,7 +1860,7 @@ impl Swarm {
                 .iter()
                 .map(|function| function.name())
                 .collect::<Vec<_>>();
-            let breaker = self.get_tool_breaker(function_call.name());
+            let breaker = self.get_tool_breaker(function_call.name())?;
 
             let tool_before = breaker.state_snapshot();
             let tool_open = breaker.is_open();
@@ -1497,7 +2025,17 @@ impl Swarm {
                         &known_tools,
                         function_call.arguments(),
                     ) {
-                        let _ = self.apply_escalation_trigger(state, exec, trigger).await?;
+                        if let Some(reason) =
+                            self.apply_escalation_trigger(state, exec, trigger).await?
+                        {
+                            return Ok(Response {
+                                messages: vec![message],
+                                agent: Some(state.agent.clone()),
+                                context_variables: state.context_variables.clone(),
+                                termination_reason: Some(reason),
+                                tokens_used,
+                            });
+                        }
                     }
                     return Err(err);
                 }
@@ -1576,7 +2114,7 @@ impl Swarm {
                     agent: Some(state.agent.clone()),
                     context_variables: state.context_variables.clone(),
                     termination_reason,
-                    tokens_used: 0,
+                    tokens_used: state.total_tokens,
                 })
             }
         }
@@ -1632,7 +2170,15 @@ impl Swarm {
             Steps { steps: Vec::new() }
         };
 
-        agent.instructions = Instructions::Text(instructions_without_xml);
+        // If the entire instructions block was XML steps, fall back to a minimal
+        // system prompt rather than producing an empty string that fails validation.
+        let effective_instructions =
+            if instructions_without_xml.trim().is_empty() && !steps.steps.is_empty() {
+                "You are a helpful assistant.".to_string()
+            } else {
+                instructions_without_xml
+            };
+        agent.instructions = Instructions::Text(effective_instructions);
         let mut state = RunState {
             agent,
             history: messages,
@@ -1839,9 +2385,9 @@ impl Swarm {
     }
 
     pub fn get_agent_by_name(&self, name: &str) -> SwarmResult<Agent> {
-        self.agent_registry
-            .get(name)
-            .cloned()
+        self.agent_directory
+            .get(&AgentRef::new(name))
+            .map(|agent| (*agent).clone())
             .ok_or_else(|| SwarmError::AgentNotFoundError(name.to_string()))
     }
 }

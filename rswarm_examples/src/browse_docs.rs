@@ -20,7 +20,10 @@ pub fn browse_rust_docs(args: ContextVariables) -> Result<ResultType> {
     let mut extracted_info = format!("Crate: {}\n", query);
 
     let reexports_selector = "div.item-name[id^='reexport.'] a";
-    println!("Searching for re-exports using selector: {}", reexports_selector);
+    println!(
+        "Searching for re-exports using selector: {}",
+        reexports_selector
+    );
 
     let reexport_hrefs = collect_href_attributes(&tab, reexports_selector)?;
     println!("Collected {} hrefs for re-exports.", reexport_hrefs.len());
@@ -51,16 +54,19 @@ pub fn browse_rust_docs(args: ContextVariables) -> Result<ResultType> {
 fn navigate_to_url(tab: &headless_chrome::Tab, url: &str) -> Result<()> {
     tab.navigate_to(url)
         .context(format!("Failed to navigate to URL: {}", url))?;
-    tab.wait_until_navigated()
-        .context(format!("Failed to wait for navigation to complete: {}", url))?;
+    tab.wait_until_navigated().context(format!(
+        "Failed to wait for navigation to complete: {}",
+        url
+    ))?;
     Ok(())
 }
 
 /// Collects all href attributes matching the given selector.
 fn collect_href_attributes(tab: &headless_chrome::Tab, selector: &str) -> Result<Vec<String>> {
-    let elements = tab
-        .find_elements(selector)
-        .context(format!("Failed to find elements with selector: {}", selector))?;
+    let elements = tab.find_elements(selector).context(format!(
+        "Failed to find elements with selector: {}",
+        selector
+    ))?;
 
     let mut hrefs = Vec::new();
     for element in &elements {
@@ -84,7 +90,14 @@ fn clean_up_extracted_info(extracted_info: String) -> String {
     let selector = Selector::parse("main, p, h1, h2, h3, h4, h5, h6, li").unwrap();
     document
         .select(&selector)
-        .map(|element| element.text().collect::<Vec<_>>().join(" ").trim().to_string())
+        .map(|element| {
+            element
+                .text()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim()
+                .to_string()
+        })
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join("\n")

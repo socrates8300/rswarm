@@ -10,11 +10,12 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Prints debug messages when debug mode is enabled
 ///
-/// Prefixes debug messages with "[DEBUG]" for easy identification in logs.
+/// Prefixes debug messages with the text `DEBUG` for easy identification in logs.
 ///
 /// # Arguments
 ///
@@ -140,12 +141,13 @@ pub fn parse_steps_from_xml(xml_content: &str) -> SwarmResult<Steps> {
 ///
 ///
 pub fn extract_xml_steps(instructions: &str) -> SwarmResult<(String, Option<String>)> {
+    static STEPS_RE: OnceLock<Regex> = OnceLock::new();
+    let re = STEPS_RE.get_or_init(|| {
+        Regex::new(r"(?s)<steps\b[^>]*>.*?</steps>").expect("static steps regex must compile")
+    });
+
     let mut instructions_without_xml = instructions.to_string();
     let mut xml_steps = None;
-
-    // Improved regex to be more robust
-    let re = Regex::new(r"(?s)<steps\b[^>]*>.*?</steps>")
-        .map_err(|e| SwarmError::Other(format!("Invalid regex pattern: {}", e)))?;
 
     if let Some(mat) = re.find(instructions) {
         let xml_content = mat.as_str();
@@ -156,7 +158,10 @@ pub fn extract_xml_steps(instructions: &str) -> SwarmResult<(String, Option<Stri
     Ok((instructions_without_xml.trim().to_string(), xml_steps))
 }
 
-/// Truncates a string to at most `max_len` chars, appending "…" if truncated.
+/// Truncates a string to at most `max_len` **bytes**, appending "…" if truncated.
+///
+/// The actual cut point may be ≤ `max_len` bytes when the byte at `max_len` falls
+/// inside a multi-byte UTF-8 sequence; the function always cuts on a char boundary.
 ///
 /// Used in Display impls to prevent accidental leakage of API keys, tokens,
 /// or PII from error messages into logs.
@@ -164,7 +169,11 @@ pub fn safe_truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}…", &s[..max_len])
+        let truncate_at = (0..=max_len)
+            .rev()
+            .find(|&i| s.is_char_boundary(i))
+            .unwrap_or(0);
+        format!("{}…", &s[..truncate_at])
     }
 }
 

@@ -16,14 +16,19 @@ default = []
 metrics-export = ["metrics-exporter-prometheus"]
 ## Enable PostgreSQL-backed persistence.
 postgres = ["tokio-postgres"]
-## Enable OpenTelemetry trace/metrics export (opentelemetry + otlp exporter).
-## Uncomment the optional deps below to activate.
-otel = []
+## Enable OpenTelemetry trace export through OTLP.
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:tracing-subscriber",
+]
 ## Enable sqlite-vec embedded vector backend.
-## Requires the sqlite_vec crate — uncomment the optional dep below.
+## The backend currently returns configuration errors until the adapter lands.
 sqlite-vec = []
 ## Enable Qdrant remote vector backend.
-## Requires qdrant-client — uncomment the optional dep below.
+## The backend currently returns configuration errors until the adapter lands.
 qdrant = []
 
 [dependencies]
@@ -32,27 +37,21 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 metrics = "0.23"
 metrics-exporter-prometheus = { version = "0.15", optional = true }
 tokio-postgres = { version = "0.7.13", optional = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
-# Uncomment to activate the `otel` feature:
-# opentelemetry        = { version = "0.24", optional = true }
-# opentelemetry_sdk    = { version = "0.24", features = ["rt-tokio"], optional = true }
-# opentelemetry-otlp   = { version = "0.17", features = ["grpc-tonic"], optional = true }
-# tracing-opentelemetry = { version = "0.25", optional = true }
-# Uncomment to activate the `sqlite-vec` feature:
-# sqlite_vec = { version = "0.1", optional = true }
-# Uncomment to activate the `qdrant` feature:
-# qdrant-client = { version = "1", optional = true }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["trace", "grpc-tonic", "tls-roots"], optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
+tracing-subscriber = { version = "0.3.20", features = ["registry"], optional = true }
 async-stream = "0.3.6"
 async-trait = "0.1.83"
 chrono = { version = "0.4.38", features = ["serde"] }
-dotenv = "0.15.0"
+dotenvy = "0.15"
 futures = "0.3.31"
 futures-util = "0.3.31"
-lazy_static = "1.5.0"
 quick-xml = { version = "0.36.2", features = ["serde", "serialize"] }
 regex = "1.11.0"
 reqwest = { version = "0.12.9", features = [
     "json",
-    "blocking",
     "stream",
     "rustls-tls",
 ] }

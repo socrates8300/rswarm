@@ -24,6 +24,39 @@ pub type ContextVariables = HashMap<String, String>;
 pub type AgentFuture = Pin<Box<dyn Future<Output = Result<ResultType, SwarmError>> + Send>>;
 pub type AgentFunctionHandler = dyn Fn(ContextVariables) -> AgentFuture + Send + Sync;
 
+/// A stable, serializable identifier for an agent used as a routing address
+/// in agent-to-agent communication. Derived from the agent's name by default.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct AgentRef(String);
+
+impl AgentRef {
+    pub fn new(name: impl Into<String>) -> Self {
+        AgentRef(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AgentRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for AgentRef {
+    fn from(s: &str) -> Self {
+        AgentRef(s.to_owned())
+    }
+}
+
+impl From<String> for AgentRef {
+    fn from(s: String) -> Self {
+        AgentRef(s)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ApiKey(String);
 
@@ -347,6 +380,7 @@ pub struct Agent {
     pub(crate) function_call: FunctionCallPolicy,
     pub(crate) parallel_tool_calls: ToolCallExecution,
     pub(crate) expected_response_fields: Vec<String>,
+    pub(crate) capabilities: Vec<String>,
 }
 
 // Custom Debug implementation for Agent.
@@ -378,6 +412,7 @@ impl Agent {
             function_call: FunctionCallPolicy::Disabled,
             parallel_tool_calls: ToolCallExecution::Serial,
             expected_response_fields: Vec::new(),
+            capabilities: Vec::new(),
         };
         agent.validate_intrinsic_fields()?;
         Ok(agent)
@@ -440,6 +475,23 @@ impl Agent {
 
     pub fn expected_response_fields(&self) -> &[String] {
         &self.expected_response_fields
+    }
+
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
+    pub fn has_capability(&self, cap: &str) -> bool {
+        self.capabilities.iter().any(|c| c == cap)
+    }
+
+    pub fn agent_ref(&self) -> AgentRef {
+        AgentRef::new(&self.name)
+    }
+
+    pub fn with_capabilities(mut self, capabilities: Vec<String>) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 
     pub(crate) fn validate_intrinsic_fields(&self) -> SwarmResult<()> {
@@ -675,8 +727,23 @@ impl AgentFunction {
     pub fn with_parameters_schema(mut self, schema: Value) -> SwarmResult<Self> {
         if !schema.is_object() {
             return Err(SwarmError::ValidationError(
-                "AgentFunction parameter schema must be a JSON object".to_string(),
+                "AgentFunction parameter schema must be a JSON Schema object \
+                 (e.g. {\"type\":\"object\",\"properties\":{...}})"
+                    .to_string(),
             ));
+        }
+        // If a "type" field is present it must be "object" — tool arguments are
+        // always dispatched as key-value pairs; scalar/array root schemas cannot
+        // be converted to ContextVariables and will fail at dispatch time.
+        if let Some(type_val) = schema.get("type") {
+            if type_val.as_str() != Some("object") {
+                return Err(SwarmError::ValidationError(format!(
+                    "AgentFunction parameter schema must declare type \"object\", \
+                     got {:?} — scalar and array root schemas are not supported; \
+                     tool arguments are always dispatched as key-value pairs",
+                    type_val
+                )));
+            }
         }
         self.parameters_schema = schema;
         Ok(self)
@@ -711,7 +778,12 @@ pub struct RuntimeLimits {
     /// Maximum number of tool calls across the entire run.
     pub max_tool_calls: Option<u32>,
 
-    /// Maximum recursion depth (agent-handoff nesting level).
+    /// Maximum number of agent handoffs allowed in a single run.
+    ///
+    /// Each time a function call or step causes an agent switch, a counter is
+    /// incremented.  When the counter exceeds this value the run is aborted with
+    /// [`crate::validation::BudgetExhausted::MaxDepth`]. A value of `1`
+    /// allows exactly one handoff.
     pub max_depth: Option<u32>,
 }
 

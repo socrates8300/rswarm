@@ -59,29 +59,16 @@ pub struct QdrantMemory {
 }
 
 impl QdrantMemory {
-    /// Connect to a Qdrant instance described by `config`.
-    ///
-    /// Returns `Err` when the `qdrant` feature is not enabled.
-    pub async fn connect(_config: QdrantConfig) -> SwarmResult<Self> {
-        #[cfg(feature = "qdrant")]
-        {
-            // TODO: wire qdrant-client once dep is uncommented.
-            // use qdrant_client::client::QdrantClient;
-            // let client = QdrantClient::from_url(&_config.host)
-            //     .with_api_key(_config.api_key.clone())
-            //     .build()?;
-            let _ = &_config;
-        }
-        #[cfg(not(feature = "qdrant"))]
-        return Err(SwarmError::ConfigError(
-            "QdrantMemory requires the `qdrant` feature: \
-             add `features = [\"qdrant\"]` to your Cargo dependency and \
-             uncomment the qdrant-client dep in Cargo.toml"
+    fn not_implemented_error() -> SwarmError {
+        SwarmError::ConfigError(
+            "QdrantMemory is not implemented yet; the feature is reserved until the adapter lands"
                 .to_string(),
-        ));
+        )
+    }
 
-        #[cfg(feature = "qdrant")]
-        Ok(Self { config: _config })
+    /// Connect to a Qdrant instance described by `config`.
+    pub async fn connect(_config: QdrantConfig) -> SwarmResult<Self> {
+        Err(Self::not_implemented_error())
     }
 }
 
@@ -94,13 +81,7 @@ impl VectorMemory for QdrantMemory {
         _embedding: Vec<f32>,
         _metadata: Value,
     ) -> SwarmResult<()> {
-        #[cfg(feature = "qdrant")]
-        {
-            // TODO: client.upsert_points(...)
-        }
-        Err(SwarmError::ConfigError(
-            "qdrant feature not enabled".to_string(),
-        ))
+        Err(Self::not_implemented_error())
     }
 
     async fn search(
@@ -108,25 +89,15 @@ impl VectorMemory for QdrantMemory {
         _query_embedding: Vec<f32>,
         _policy: RetrievalPolicy,
     ) -> SwarmResult<Vec<MemoryEntry>> {
-        #[cfg(feature = "qdrant")]
-        {
-            // TODO: client.search_points(...)
-        }
-        Err(SwarmError::ConfigError(
-            "qdrant feature not enabled".to_string(),
-        ))
+        Err(Self::not_implemented_error())
     }
 
     async fn delete(&self, _id: &str) -> SwarmResult<()> {
-        Err(SwarmError::ConfigError(
-            "qdrant feature not enabled".to_string(),
-        ))
+        Err(Self::not_implemented_error())
     }
 
     async fn len(&self) -> SwarmResult<usize> {
-        Err(SwarmError::ConfigError(
-            "qdrant feature not enabled".to_string(),
-        ))
+        Err(Self::not_implemented_error())
     }
 }
 
@@ -135,13 +106,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_connect_fails_without_feature() {
+    async fn test_connect_reports_backend_unavailable() {
         let result = QdrantMemory::connect(QdrantConfig::default()).await;
-        // Without the `qdrant` feature this must return an error.
-        #[cfg(not(feature = "qdrant"))]
         assert!(result.is_err());
-        // With the feature it would succeed (or fail to connect to localhost).
-        #[cfg(feature = "qdrant")]
-        let _ = result;
     }
 }
