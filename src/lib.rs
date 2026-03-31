@@ -70,8 +70,9 @@ pub use crate::tool::{
 };
 pub use crate::types::RuntimeLimits;
 pub use crate::types::{
-    Agent, AgentRef, ContextVariables, FunctionCall, FunctionCallPolicy, Instructions, Message,
-    MessageRole, Response, SwarmConfig, ToolCallExecution,
+    Agent, AgentFunction, AgentRef, ContextVariables, FunctionCall, FunctionCallPolicy,
+    Instructions, Message, MessageRole, Response, ResultType, SwarmConfig, ToolCall,
+    ToolCallExecution,
 };
 pub use crate::validation::{
     verify_structured_response, verify_tool_arguments, BudgetEnforcer, BudgetExhausted,

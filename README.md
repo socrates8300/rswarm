@@ -1,548 +1,425 @@
-# rswarm: A Comprehensive Guide to AI Agent Interactions in Rust
+# rswarm
 
-Welcome, fellow Rustacean! If you’re aiming to integrate advanced AI agent interactions into your Rust applications, you’ve come to the right place. rswarm is a powerful and user-friendly library designed to simplify and enhance your AI development experience in Rust.
+`rswarm` is a Rust library for agent-style LLM workflows: multi-turn conversations, function and tool calling, streaming responses, XML-defined execution steps, persistence, guardrails, and event hooks.
 
-Embark on this journey with us as we explore how rswarm can empower your projects with intelligent agent capabilities.
+The current workspace passes:
 
-## Introduction
+- `cargo fmt --all --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo doc --no-deps --all-features`
+- `cargo test --workspace --all-features`
 
-rswarm is a Rust library crafted to streamline AI agent interactions, particularly when working with OpenAI’s API. It provides a robust framework for:
+## What It Covers
 
-- **Managing AI agents with customizable behaviors**: Define agents with specific instructions and functions tailored to your application’s needs.
-- **Executing conversations with advanced control**: Run complex dialogues with agents, controlling parameters like context, functions, and looping behaviors.
-- **Integrating custom functions for extended capabilities**: Enhance agents with custom functions that can be called during conversations.
-- **Handling streaming responses and error scenarios gracefully**: Receive real-time, incremental responses using our streaming API and implement robust error handling.
-- **Defining prompts and execution steps using XML**: Utilize XML to structure prompts, handoffs, function calls, and execution steps for more complex interactions.
-
-Whether you’re building a chatbot, an AI assistant, or any application requiring intelligent dialogue, rswarm equips you with the tools to make it happen efficiently.
-
-## Acknowledgments
-
-This project, rswarm, is inspired by and extends the concepts introduced in the [Swarm](https://github.com/openai/swarm) framework developed by OpenAI. Swarm is an educational framework that explores ergonomic, lightweight multi-agent orchestration. It provides a foundation for agent coordination and execution through abstractions like Agents and handoffs, allowing for scalable and customizable solutions.
-
-We would like to express our gratitude to the OpenAI team for their innovative work on Swarm, which has significantly influenced the development of rswarm. Special thanks to the core contributors of Swarm, including Ilan Bigio, James Hills, Shyamal Anadkat, Charu Jaiswal, Colin Jarvis, and Katia Gil Guzman, among others.
-
-By building upon Swarm, rswarm aims to bring these powerful concepts into the Rust ecosystem, enhancing them to suit our specific needs and preferences. We hope to continue pushing the boundaries of what's possible with Rust and AI, inspired by the groundwork laid by OpenAI.
-
-Feel free to explore the rswarm framework further, contribute to its development, or reach out with questions. Together, we can continue to innovate and expand the capabilities of AI agent interactions.
-
-Happy coding!
+- Agent construction with static or dynamic instructions
+- Multi-turn `Swarm::run(...)` conversations
+- Function calling with serial or parallel tool execution
+- Streaming responses through `rswarm::stream::Streamer`
+- Structured response checks and JSON Schema-backed tool argument validation
+- SQLite and PostgreSQL persistence backends
+- Event subscribers, circuit breakers, escalation, and guardrails
+- In-memory semantic memory plus feature-gated vector backends
 
 ## Installation
 
-To get started with rswarm, you need to add it to your project’s dependencies. Ensure you have Rust and Cargo installed on your system.
+Add the library:
 
-### Adding rswarm to Your Project
-
-In your `Cargo.toml` file, add:
 ```bash
 cargo add rswarm
 ```
 
-After updating `Cargo.toml`, fetch the dependencies by running:
+For most applications you will also want:
+
 ```bash
-cargo build
+cargo add tokio --features macros,rt-multi-thread
+cargo add dotenvy
+cargo add serde_json
 ```
 
-### Setting Up Environment Variables
+If you plan to use the streaming API shown below:
 
-rswarm relies on environment variables for configuration:
-
-- **OPENAI_API_KEY (required)**: Your OpenAI API key.
-- **OPENAI_API_URL (optional)**: Custom API URL if not using the default.
-
-Set them in your shell or a `.env` file:
 ```bash
-export OPENAI_API_KEY="your-api-key"
-export OPENAI_API_URL="https://api.openai.com/v1/chat/completions"  # Optional
+cargo add futures-util
 ```
 
-In your Rust application, load the `.env` file:
-```rust
-dotenv::dotenv().ok();
+Optional feature flags:
+
+- `postgres`: PostgreSQL persistence
+- `postgres-tls`: PostgreSQL persistence with rustls + native roots
+- `metrics-export`: Prometheus metrics exporter
+- `otel`: OpenTelemetry tracing export
+- `sqlite-vec`: reserved feature; adapter currently returns a configuration error
+- `qdrant`: reserved feature; adapter currently returns a configuration error
+
+Example:
+
+```bash
+cargo add rswarm --features postgres,postgres-tls
 ```
 
-> **Note**: Keep your API key secure and avoid committing it to version control.
+## Configuration
+
+Environment variables:
+
+- `OPENAI_API_KEY`: required unless passed directly to `Swarm::builder().with_api_key(...)`
+- `OPENAI_API_URL`: optional override for the chat-completions endpoint
+
+Default API URL:
+
+```text
+https://api.openai.com/v1/chat/completions
+```
+
+The examples crate also uses:
+
+- `OPENAI_MODEL`: optional, defaults to `gpt-4o`
 
 ## Quick Start
 
-Let’s dive into some examples to see rswarm in action.
-
-### Creating a Swarm Instance
-
-The `Swarm` struct is the heart of the library, managing API communication and agent interactions. You can create a Swarm instance using the builder pattern.
-
-#### Using the Builder Pattern
+`Swarm::run(...)` requires a non-empty message history. Use the message constructors instead of struct literals.
 
 ```rust
-use rswarm::Swarm;
+use rswarm::{Agent, ContextVariables, Instructions, Message, Swarm};
 
-let swarm = Swarm::builder()
-    .build()
-    .expect("Failed to create Swarm");
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+
+    let agent = Agent::new(
+        "assistant",
+        "gpt-4o",
+        Instructions::Text("You are a concise Rust assistant.".to_string()),
+    )?;
+
+    let swarm = Swarm::builder()
+        .with_agent(agent.clone())
+        .build()?;
+
+    let response = swarm
+        .run(
+            agent,
+            vec![Message::user("Give me a one-sentence overview of ownership.")?],
+            ContextVariables::new(),
+            None,
+            false,
+            false,
+            5,
+        )
+        .await?;
+
+    for message in &response.messages {
+        if let Some(content) = message.content() {
+            println!("{}: {}", message.role(), content);
+        }
+    }
+
+    Ok(())
+}
 ```
 
-If you’ve set the `OPENAI_API_KEY` environment variable, you can omit the `.with_api_key()` method. If you prefer to pass the API key directly:
+## Defining Agents
+
+Create agents with `Agent::new(...)` and then opt into additional behavior with builder-style methods:
 
 ```rust
-let swarm = Swarm::builder()
-    .with_api_key("your-api-key".to_string())
-    .build()
-    .expect("Failed to create Swarm");
+use rswarm::{Agent, FunctionCallPolicy, Instructions, ToolCallExecution};
+
+let agent = Agent::new(
+    "router",
+    "gpt-4o",
+    Instructions::Text("Route requests to the right tool.".to_string()),
+)?
+.with_function_call_policy(FunctionCallPolicy::Auto)
+.with_tool_call_execution(ToolCallExecution::Parallel)
+.with_capabilities(vec!["routing".to_string(), "triage".to_string()]);
 ```
 
-### Defining Agents
+Relevant agent APIs:
 
-An `Agent` encapsulates the behavior and capabilities of an AI assistant.
+- `with_functions(...)`
+- `with_function_call_policy(...)`
+- `with_tool_call_execution(...)`
+- `with_expected_response_fields(...)`
+- `with_capabilities(...)`
 
-#### Creating an Agent
+Instruction modes:
+
+- `Instructions::Text(String)`
+- `Instructions::Function(Arc<dyn Fn(ContextVariables) -> String + Send + Sync>)`
+
+## Function Calling
+
+`AgentFunction` is the main application-level tool/function abstraction used during `Swarm::run(...)`.
+
+```rust
+use rswarm::{
+    Agent, AgentFunction, ContextVariables, FunctionCallPolicy, Instructions, ResultType,
+    ToolCallExecution,
+};
+use serde_json::json;
+use std::sync::Arc;
+
+let weather = AgentFunction::new(
+    "get_weather",
+    Arc::new(|args: ContextVariables| {
+        Box::pin(async move {
+            let city = args
+                .get("city")
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            Ok(ResultType::Value(format!("Sunny in {city}")))
+        })
+    }),
+    true,
+)?
+.with_description("Return a short weather summary for a city")
+.with_parameters_schema(json!({
+    "type": "object",
+    "properties": {
+        "city": { "type": "string" }
+    },
+    "required": ["city"],
+    "additionalProperties": false
+}))?;
+
+let agent = Agent::new(
+    "weather-bot",
+    "gpt-4o",
+    Instructions::Text("Use tools when needed.".to_string()),
+)?
+.with_functions(vec![weather])
+.with_function_call_policy(FunctionCallPolicy::Auto)
+.with_tool_call_execution(ToolCallExecution::Parallel);
+```
+
+Notes:
+
+- Parameter schemas must be JSON Schema objects with root `"type": "object"`.
+- Tool arguments are validated with `jsonschema`, not a hand-rolled subset.
+- `accepts_context_variables = true` passes validated arguments into the handler as `ContextVariables`.
+- `ToolCallExecution::Serial` threads context updates from one call into the next.
+- `ToolCallExecution::Parallel` executes calls independently and preserves per-tool success/failure reporting.
+
+## Low-Level Tool API
+
+If you want a lower-level tool abstraction outside the `AgentFunction` flow, the crate also exposes:
+
+- `Tool`
+- `ClosureTool`
+- `ToolRegistry`
+- `InvocationArgs`
+- `ToolSchema`
+- `ToolCallSpec`
+
+Use this layer when you want explicit tool registration/execution without relying on `AgentFunction`.
+
+## Messages
+
+Use constructors instead of field access:
+
+```rust
+use rswarm::{FunctionCall, Message, ToolCall};
+
+let user = Message::user("hello")?;
+let assistant = Message::assistant("hi")?;
+let function = Message::function("lookup_user", "{\"id\":42}")?;
+let tool_result = Message::tool_result("call_123", "{\"ok\":true}")?;
+
+let tool_call = ToolCall::new("call_123", FunctionCall::new("lookup_user", "{\"id\":42}")?)?;
+let assistant_with_tools = Message::assistant_tool_calls(vec![tool_call])?;
+```
+
+Important message constraints:
+
+- `Swarm::run(...)` rejects an empty `messages` vector
+- assistant messages must contain exactly one of `content`, `function_call`, or `tool_calls`
+- tool messages must include `tool_call_id`
+
+## Streaming
+
+Use `rswarm::stream::Streamer` for incremental output:
+
+```rust
+use futures_util::StreamExt;
+use rswarm::{stream::Streamer, Agent, ContextVariables, Instructions, Message, Swarm};
+
+let agent = Agent::new(
+    "assistant",
+    "gpt-4o",
+    Instructions::Text("Respond in short streaming chunks.".to_string()),
+)?;
+
+let swarm = Swarm::builder()
+    .with_api_key(std::env::var("OPENAI_API_KEY")?)
+    .with_agent(agent.clone())
+    .build()?;
+
+let streamer = Streamer::new(
+    swarm.client().clone(),
+    swarm.api_key().clone(),
+    swarm.config().api_url().to_string(),
+);
+
+let history = vec![Message::user("Stream a greeting.")?];
+let mut stream = streamer.stream_chat(
+    &agent,
+    &history,
+    &ContextVariables::new(),
+    None,
+    false,
+);
+
+while let Some(item) = stream.next().await {
+    let message = item?;
+    if let Some(content) = message.content() {
+        print!("{content}");
+    }
+}
+```
+
+## Structured Responses
+
+If you expect a JSON-shaped answer, you can require fields up front:
 
 ```rust
 use rswarm::{Agent, Instructions};
 
-let agent = Agent {
-    name: "assistant".to_string(),
-    model: "gpt-3.5-turbo".to_string(),
-    instructions: Instructions::Text("You are a helpful assistant.".to_string()),
-    functions: vec![],
-    function_call: None,
-    parallel_tool_calls: false,
-};
+let agent = Agent::new(
+    "structured",
+    "gpt-4o",
+    Instructions::Text("Respond with JSON only.".to_string()),
+)?
+.with_expected_response_fields(vec![
+    "answer".to_string(),
+    "confidence".to_string(),
+])?;
 ```
 
-#### Understanding Instructions
+## XML-Defined Execution Steps
 
-Instructions guide the agent’s behavior. They can be:
+`rswarm` can extract and execute XML-defined steps embedded in the instruction text. The `Swarm::run(...)` path handles parsing and execution automatically.
 
-- **Static Text**: Fixed instructions provided as a `String`.
-- **Dynamic Functions**: Generate instructions based on context using a closure.
-
-Example of dynamic instructions:
-
-```rust
-use rswarm::{Instructions, ContextVariables};
-use std::sync::Arc;
-
-let dynamic_instructions = Instructions::Function(Arc::new(|context: ContextVariables| {
-    format!(
-        "You are a helpful assistant aware of the user's location: {}.",
-        context.get("location").unwrap_or(&"unknown".to_string())
-    )
-}));
-```
-
-### Running Conversations
-
-Let’s initiate a conversation with our agent.
-
-#### Initiating a Chat (Batch Mode)
-
-```rust
-use rswarm::{Message, ContextVariables};
-use std::collections::HashMap;
-
-let messages = vec![Message {
-    role: "user".to_string(),
-    content: Some("Hello, assistant!".to_string()),
-    name: None,
-    function_call: None,
-}];
-
-let context_variables = ContextVariables::new();  // An empty context
-
-let response = swarm
-    .run(
-        agent.clone(),
-        messages,
-        context_variables,
-        None,    // No model override
-        false,   // Streaming disabled
-        false,   // Debug mode off
-        5        // Max turns
-    )
-    .await
-    .expect("Failed to run the conversation");
-
-for msg in response.messages {
-    println!("{}: {}", msg.role, msg.content.unwrap_or_default());
-}
-```
-
-The agent responds according to the instructions provided.
-
-### Streaming Responses
-
-For real-time applications, you can enable streaming to receive incremental responses.
-
-#### Streaming Example
-
-Instead of calling `run()`, create a `Streamer` from the Swarm’s client and API key:
-
-```rust
-use rswarm::stream::Streamer;
-use futures_util::StreamExt;
-use std::collections::HashMap;
-
-let streamer = Streamer::new(swarm.client.clone(), swarm.api_key.clone());
-
-let history = Vec::new();
-let context_variables = HashMap::new();
-let agent = agent.clone();  // The primary agent
-
-println!("Starting streaming conversation output:");
-let mut stream = streamer.stream_chat(&agent, &history, &context_variables, None, false);
-
-// Process each streamed message as soon as it arrives.
-while let Some(item) = stream.next().await {
-    match item {
-        Ok(message) => {
-            println!(
-                "{} {}: {}",
-                message.name.as_deref().unwrap_or("Unknown"),
-                message.role,
-                message.content.as_deref().unwrap_or("")
-            );
-            println!("--------------------------------");
-        }
-        Err(e) => eprintln!("Stream error: {}", e),
-    }
-}
-println!("Streaming conversation completed.");
-```
-
-In this example, the agent’s response is received incrementally via the Streamer.
-
-## Deep Dive
-
-Let’s explore rswarm in greater detail, uncovering its full potential.
-
-### Swarm Configuration
-
-Customize Swarm behavior using `SwarmConfig`.
-
-#### Custom Configuration
-
-```rust
-use rswarm::{Swarm, SwarmConfig};
-
-let custom_config = SwarmConfig {
-    request_timeout: 60,
-    max_retries: 5,
-    ..Default::default()
-};
-
-let swarm = Swarm::builder()
-    .with_config(custom_config)
-    .build()
-    .expect("Failed to create Swarm with custom configuration");
-```
-
-Adjust parameters like timeouts and retries based on application needs.
-
-### Agent Functions
-
-**Note:** In rswarm version 2.0, the `AgentFunction` has been refactored to be asynchronous. This means that the stored function must now return a pinned boxed future (using `Box::pin(async move { ... })`) rather than a plain synchronous result. This change removes the need for blocking calls and makes integration with asynchronous runtimes seamless.
-
-#### Defining Agent Functions
-
-Below is an updated example:
-
-```rust
-use rswarm::{AgentFunction, ContextVariables, ResultType};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-
-let echo_function = AgentFunction {
-    name: "echo".to_string(),
-    function: Arc::new(|args: ContextVariables| -> Pin<Box<dyn Future<Output = Result<ResultType, anyhow::Error>> + Send>> {
-        Box::pin(async move {
-            let message = args.get("message").cloned().unwrap_or_default();
-            Ok(ResultType::Value(message))
-        })
-    }),
-    accepts_context_variables: true,
-};
-```
-
-#### Adding Functions to an Agent
-
-```rust
-agent.functions.push(echo_function);
-agent.function_call = Some("auto".to_string());
-```
-
-With `function_call` set to `"auto"`, the agent decides when to use the functions.
-
-### Context Variables
-
-Context variables provide dynamic data to agents.
-
-#### Using Context Variables
-
-```rust
-let mut context_variables = ContextVariables::new();
-context_variables.insert("location".to_string(), "Berlin".to_string());
-
-let dynamic_instructions = Instructions::Function(Arc::new(|context: ContextVariables| {
-    format!("You are a helpful assistant. The user's location is {}.", context.get("location").unwrap())
-}));
-
-agent.instructions = dynamic_instructions;
-```
-
-The agent tailors responses based on the context provided.
-
-### Handling Function Calls
-
-Agents can call functions during conversations to perform specific tasks.
-
-#### Implementing Function Handling
-
-Define a function, add it to the agent, and then proceed with a conversation:
-
-```rust
-use rswarm::{AgentFunction, ContextVariables, ResultType};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-
-let echo_function = AgentFunction {
-    name: "echo".to_string(),
-    function: Arc::new(|args: ContextVariables| -> Pin<Box<dyn Future<Output = Result<ResultType, anyhow::Error>> + Send>> {
-        Box::pin(async move {
-            let message = args.get("message").cloned().unwrap_or_default();
-            Ok(ResultType::Value(message))
-        })
-    }),
-    accepts_context_variables: true,
-};
-
-agent.functions.push(echo_function);
-agent.function_call = Some("auto".to_string());
-
-let messages = vec![Message {
-    role: "user".to_string(),
-    content: Some("Repeat after me: Hello World!".to_string()),
-    name: None,
-    function_call: None,
-}];
-
-let response = swarm
-    .run(
-        agent.clone(),
-        messages,
-        ContextVariables::new(),
-        None,
-        false,
-        false,
-        5
-    )
-    .await
-    .expect("Failed to run the conversation");
-
-for msg in response.messages {
-    println!("{}: {}", msg.role, msg.content.unwrap_or_default());
-}
-```
-
-### XML-Defined Prompts and Execution Steps
-
-rswarm also allows for XML definitions to structure multi-step interactions.
-
-#### Embedding XML Steps in Instructions
+Example shape:
 
 ```xml
 <steps>
   <step number="1" action="run_once">
-    <prompt>Introduce yourself.</prompt>
+    <prompt>Summarize the request.</prompt>
   </step>
   <step number="2" action="loop" agent="assistant">
-    <prompt>Answer the user's questions until they say 'goodbye'.</prompt>
+    <prompt>Continue until the task is complete.</prompt>
   </step>
 </steps>
 ```
 
-#### Parsing and Executing XML Steps
+See [`rswarm_examples/prompt.txt`](rswarm_examples/prompt.txt) for a real example.
+
+## Persistence
+
+SQLite:
 
 ```rust
-use rswarm::{extract_xml_steps, parse_steps_from_xml, Steps};
+use rswarm::{SqliteStore, Swarm};
 
-let instructions = r#"
-You are about to engage in a conversation.
-<steps>
-  <step number="1" action="run_once">
-    <prompt>Introduce yourself.</prompt>
-  </step>
-  <step number="2" action="loop" agent="assistant">
-    <prompt>Answer the user's questions until they say 'goodbye'.</prompt>
-  </step>
-</steps>
-Proceed with the conversation.
-"#;
-
-let (instructions_without_xml, xml_steps) = extract_xml_steps(instructions).unwrap();
-
-let steps = if let Some(xml_content) = xml_steps {
-    parse_steps_from_xml(&xml_content).unwrap()
-} else {
-    Steps { steps: Vec::new() }
-};
+let store = SqliteStore::open("rswarm.db")?;
+let swarm = Swarm::builder()
+    .with_api_key(std::env::var("OPENAI_API_KEY")?)
+    .with_persistence_backend(store)
+    .build()?;
 ```
 
-The Swarm’s `run()` method automatically handles the execution of steps defined in XML.
-
-### Advanced Topics and Best Practices
-
-- **Secure API Keys**: Use environment variables and avoid hardcoding sensitive information.
-- **Handle Errors Gracefully**: Implement retry logic and provide user-friendly error messages.
-- **Optimize Performance**: Adjust timeouts and retries based on application needs.
-- **Keep Agents Modular**: Design agents with single responsibilities for easier maintenance.
-- **Leverage Context**: Use context variables to enhance agent responses dynamically.
-- **Use XML for Complex Flows**: Utilize XML definitions for structured and maintainable conversation flows.
-- **Test Thoroughly**: Write tests (as provided in the examples) to ensure your agents and functions work as expected.
-
-## Conclusion
-
-We’ve explored the landscape of rswarm—how it simplifies AI agent interactions in Rust while providing advanced features like streaming responses, agent functions, and XML-based execution flows. Whether you’re just starting with AI in Rust or pushing the boundaries of complex interactions, rswarm provides a robust foundation to build upon.
-
-Happy coding!
-
-## Appendix: API Reference
-
-### Swarm Struct
+PostgreSQL:
 
 ```rust
-pub struct Swarm {
-    pub client: Client,
-    pub api_key: String,
-    pub agent_registry: HashMap<String, Agent>,
-    pub config: SwarmConfig,
-}
+use rswarm::PostgresStore;
+
+// Localhost / Unix-socket only, because this path uses NoTls.
+let local_store = PostgresStore::connect("postgres://localhost/rswarm").await?;
 ```
 
-**Purpose**: Manages API communication and agent interactions.
-**Key Methods**:
-- `run()`: Executes a conversation (batch mode or with XML-defined steps).
-- `builder()`: Initializes a `SwarmBuilder`.
-- `get_agent_by_name()`: Retrieves an agent from the registry.
-
-### Agent Struct
+For remote PostgreSQL, use TLS:
 
 ```rust
-pub struct Agent {
-    pub name: String,
-    pub model: String,
-    pub instructions: Instructions,
-    pub functions: Vec<AgentFunction>,
-    pub function_call: Option<String>,
-    pub parallel_tool_calls: bool,
-}
+use rswarm::PostgresStore;
+
+let store = PostgresStore::connect_with_native_roots(
+    "postgres://user:pass@db.example.com/rswarm",
+)
+.await?;
 ```
 
-**Purpose**: Defines an AI assistant’s behavior.
-**Fields**:
-- `name`: Unique identifier.
-- `model`: AI model to be used (e.g., "gpt-3.5-turbo", "gpt-4").
-- `instructions`: Guides the agent’s responses (static or dynamic).
-- `functions`: Custom functions available to the agent.
-- `function_call`: Determines when functions are called.
-- `parallel_tool_calls`: Enables parallel execution of functions.
+This helper requires the `postgres-tls` feature.
 
-### AgentFunction Struct
+Persistence backends cover sessions, events, checkpoints, and memory records.
 
-```rust
-pub struct AgentFunction {
-    pub name: String,
-    pub function: Arc<dyn Fn(ContextVariables) -> Pin<Box<dyn Future<Output = Result<ResultType, anyhow::Error>> + Send>> + Send + Sync>,
-    pub accepts_context_variables: bool,
-}
+## Semantic Memory
+
+Available today:
+
+- `InMemoryVectorStore`
+- `RetrievalPolicy`
+- `VectorMemory`
+
+Current status of feature-gated adapters:
+
+- `sqlite-vec`: feature exists, persistent adapter currently returns a configuration error
+- `qdrant`: feature exists, adapter currently returns a configuration error
+
+Use `InMemoryVectorStore` for development and small deployments until those adapters land.
+
+## Events, Guardrails, and Runtime Controls
+
+The builder supports:
+
+- `with_subscriber(...)`
+- `with_runtime_limits(...)`
+- `with_content_policy(...)`
+- `with_injection_policy(...)`
+- `with_redaction_policy(...)`
+- `with_redaction_threshold(...)`
+- `with_escalation_config(...)`
+- `with_provider_circuit_breaker(...)`
+- `with_tool_circuit_breaker(...)`
+
+These are useful for observability, compliance, and production hardening.
+
+## Examples
+
+Runnable example crate:
+
+```bash
+cargo run -p rswarm_examples
 ```
 
-**Purpose**: Enables agents to execute custom logic asynchronously.
-**Fields**:
-- `name`: Identifier for the function.
-- `function`: The asynchronous function logic.
-- `accepts_context_variables`: Indicates if context variables are used.
+The example crate uses `dotenvy`, reads [`rswarm_examples/prompt.txt`](rswarm_examples/prompt.txt), and requires a local Chrome/Chromium install for the docs browser tool.
 
-### SwarmConfig Struct
+See:
 
-```rust
-pub struct SwarmConfig {
-    pub api_url: String,
-    pub api_version: String,
-    pub request_timeout: u64,
-    pub connect_timeout: u64,
-    pub max_retries: u32,
-    pub max_loop_iterations: u32,
-    pub valid_model_prefixes: Vec<String>,
-    pub valid_api_url_prefixes: Vec<String>,
-    pub loop_control: LoopControl,
-    pub api_settings: ApiSettings,
-}
+- [`rswarm_examples/src/main.rs`](rswarm_examples/src/main.rs)
+- [`rswarm_examples/README.md`](rswarm_examples/README.md)
+
+## Development Workflow
+
+Useful commands:
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo doc --no-deps --all-features
+cargo test --workspace --all-features
+cargo audit
 ```
 
-**Purpose**: Configures Swarm behavior, including API endpoints, timeouts, and retry logic.
+## Current Caveats
 
-### Instructions Enum
-
-```rust
-pub enum Instructions {
-    Text(String),
-    Function(Arc<dyn Fn(ContextVariables) -> String + Send + Sync>),
-}
-```
-
-**Purpose**: Provides static or dynamic instructions for agents.
-
-### ContextVariables Type
-
-```rust
-pub type ContextVariables = HashMap<String, String>;
-```
-
-**Purpose**: Stores key-value pairs for dynamic context within conversations.
-
-### ResultType Enum
-
-```rust
-pub enum ResultType {
-    Value(String),
-    Agent(Agent),
-    ContextVariables(ContextVariables),
-}
-```
-
-**Purpose**: Represents the result of an agent function execution.
-
-### Streaming with Streamer
-
-The new `Streamer` struct enables receiving real-time agent responses.
-
-```rust
-pub struct Streamer {
-    client: Client,
-    api_key: String,
-}
-```
-
-**Key Method**:
-- `stream_chat()`: Returns an asynchronous stream yielding incremental responses as `Message` items.
+- `Swarm::run(...)` requires at least one input message
+- the vector database adapters behind `sqlite-vec` and `qdrant` are not implemented yet
+- `Agent` and `Message` use constructors/builders; their internal fields are not public API
+- remote PostgreSQL connections should use TLS helpers, not `PostgresStore::connect(...)`
 
 ## License
 
-This project is licensed under the MIT License.
+Licensed under either:
 
-## Acknowledgments
-
-A heartfelt thank you to all contributors and the Rust community. Your support and collaboration make projects like rswarm possible.
-
-Feel free to explore the library further, contribute to its development, or reach out with questions. Together, we can continue to push the boundaries of what’s possible with Rust and AI.
-
-Happy coding!
-```
-
-────────────────────────────
-Note:
-In this version, the `AgentFunction` struct now requires that the function field return an asynchronous pinned boxed future. This means that when defining agent functions, wrap your function body using `Box::pin(async move { ... })` to produce the correct return type.
-────────────────────────────
+- MIT
+- Apache-2.0

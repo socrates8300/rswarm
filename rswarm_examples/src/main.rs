@@ -2,15 +2,14 @@
 
 mod browse_docs;
 
+use crate::browse_docs::browse_rust_docs;
 use anyhow::{Context, Result};
 use dotenvy::dotenv;
-use rswarm::types::AgentFunction;
-use rswarm::{Agent, Instructions, Message, Swarm, ToolCallExecution};
+use rswarm::{Agent, AgentFunction, Instructions, Message, Swarm, ToolCallExecution};
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::{collections::HashMap, env, fs, sync::Arc};
-// use tokio::signal;
-use crate::browse_docs::browse_rust_docs;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,7 +19,7 @@ async fn main() -> Result<()> {
     // Retrieve configuration from environment variables
     let api_key = get_env_var("OPENAI_API_KEY")?;
     let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
-    let prompt = read_prompt_file("prompt.txt")?;
+    let prompt = read_prompt_file(example_path("prompt.txt"))?;
 
     // Define the browse_docs function for agents
     let browse_docs_function = AgentFunction::new(
@@ -80,8 +79,8 @@ async fn main() -> Result<()> {
     // Display the response messages
     display_response(&response);
 
-    // Gracefully handle shutdown signals
-    wait_for_shutdown().await;
+    // Keep the terminal open so the final output can be inspected.
+    wait_for_exit_prompt().await;
 
     Ok(())
 }
@@ -92,8 +91,14 @@ fn get_env_var(key: &str) -> Result<String> {
 }
 
 /// Reads the prompt from the given file path.
-fn read_prompt_file(path: &str) -> Result<String> {
-    fs::read_to_string(path).with_context(|| format!("Failed to read prompt file '{}'", path))
+fn read_prompt_file(path: impl AsRef<Path>) -> Result<String> {
+    let path = path.as_ref();
+    fs::read_to_string(path)
+        .with_context(|| format!("Failed to read prompt file '{}'", path.display()))
+}
+
+fn example_path(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
 
 /// Initializes all agents required for the swarm.
@@ -140,21 +145,6 @@ fn initialize_agents(
     Ok(agents)
 }
 
-/// Extends the Swarm builder with multiple agents.
-pub trait SwarmBuilderExt {
-    fn with_agents(self, agents: &HashMap<String, Agent>) -> Self;
-}
-
-// Refactor this is now part of the SwarmBuilder trait
-impl SwarmBuilderExt for rswarm::core::SwarmBuilder {
-    fn with_agents(mut self, agents: &HashMap<String, Agent>) -> Self {
-        for agent in agents.values() {
-            self = self.with_agent(agent.clone());
-        }
-        self
-    }
-}
-
 /// Displays the response messages in a readable format.
 fn display_response(response: &rswarm::Response) {
     for message in &response.messages {
@@ -168,8 +158,8 @@ fn display_response(response: &rswarm::Response) {
     }
 }
 
-/// Waits for a shutdown signal to gracefully terminate the application.
-async fn wait_for_shutdown() {
+/// Wait for user input before exiting so the final output stays visible.
+async fn wait_for_exit_prompt() {
     println!("Workflow completed. \nPress Enter to exit...");
     let mut input = String::new();
     let _ = std::io::stdin().read_line(&mut input);

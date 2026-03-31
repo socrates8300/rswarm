@@ -8,6 +8,7 @@ pub use rswarm::types::{Agent, Instructions, Response};
 mod tests {
     use rswarm::{Agent, Instructions, Message, Swarm};
     use std::collections::HashMap;
+    use std::path::Path;
 
     /// Ensure Swarm::run rejects an empty message history — guards against
     /// EXAMPLES-001 regressing (passing Vec::new() to run()).
@@ -38,6 +39,16 @@ mod tests {
         assert!(
             msg.is_ok(),
             "Message::user must succeed with non-empty content"
+        );
+    }
+
+    #[test]
+    fn prompt_file_is_available_from_manifest_dir() {
+        let prompt_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("prompt.txt");
+        assert!(
+            prompt_path.exists(),
+            "expected example prompt at {}",
+            prompt_path.display()
         );
     }
 }

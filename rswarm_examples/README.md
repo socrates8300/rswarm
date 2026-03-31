@@ -1,69 +1,71 @@
-# RSwarm Examples
+# rswarm_examples
 
-This contains an example implementation of the RSwarm framework, demonstrating how to build AI-powered applications using Rust.
+`rswarm_examples` is the workspace example crate for `rswarm`. It exercises a small multi-agent workflow, uses the XML step executor in [`prompt.txt`](prompt.txt), and demonstrates a tool-backed docs browser built on `headless_chrome`.
 
-## Overview
+## What It Runs
 
-RSwarm Examples showcases practical applications of the RSwarm framework, including:
-- Multi-agent interactions
-- Documentation browsing capabilities
-- Structured prompt execution
-- Environment configuration
+The example wires together three agents:
+
+- `Agent`: produces the main draft
+- `AgentManager`: reviews and improves the draft
+- `DocBrowserAgent`: uses the `browse_docs` tool to inspect `docs.rs`
+
+The run loop starts with a seeded user message because `Swarm::run(...)` requires a non-empty message history.
 
 ## Prerequisites
 
-- Rust (latest stable version)
-- An OpenAI API key
-- Chrome/Chromium (for headless browser functionality)
+- Rust stable
+- An OpenAI-compatible API key in `OPENAI_API_KEY`
+- Chrome or Chromium available locally for `headless_chrome`
+- Network access to `docs.rs` and the configured chat-completions endpoint
 
-## Installation
+## Configuration
 
-1. Clone the repository
-2. Create a `.env` file in the project root with:
+From the workspace root, create a `.env` file:
 
 ```env
-OPENAI_API_KEY=<your-openai-api-key>
-OPENAI_MODEL=gpt-4  # Optional, defaults to gpt-4
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o
 ```
 
-## Project Structure
+`OPENAI_MODEL` is optional and defaults to `gpt-4o`.
 
-- `src/main.rs` - Main application demonstrating multi-agent setup
-- `src/browse_docs.rs` - Documentation browser implementation
-- `prompt.txt` - Example structured prompt for agent interactions
+## Running The Example
 
-## Features
+From the workspace root:
 
-### Documentation Browser Agent
-Automatically browses and extracts information from Rust documentation using headless Chrome:
-- Struct listings
-- Function listings
-- API documentation parsing
-
-### Multi-Agent System
-Implements three distinct agents:
-1. Primary Agent - Executes main tasks
-2. Agent Manager - Reviews and provides feedback (CTO role)
-3. Doc Browser Agent - Handles documentation queries
-
-## Usage
-
-Run the example:
 ```bash
-cargo run 
+cargo run -p rswarm_examples
 ```
 
-This will execute a multi-agent workflow that:
-1. Browses Rust documentation
-2. Generates implementation ideas
-3. Reviews and improves the suggestions
-4. Creates a final article
+From the crate directory:
 
-## Dependencies
+```bash
+cargo run
+```
 
-Key dependencies include:
-- `rswarm`: Core framework
-- `headless_chrome`: Browser automation
-- `tokio`: Async runtime
-- `anyhow`: Error handling
-- `dotenv`: Environment configuration
+The example will:
+
+1. Load the XML prompt from `prompt.txt`
+2. Ask the docs browser tool to inspect crate documentation
+3. Generate an article draft
+4. Review that draft with the manager agent
+5. Print the final response and wait for Enter before exiting
+
+## Important Files
+
+- [`src/main.rs`](src/main.rs): example entry point and agent wiring
+- [`src/browse_docs.rs`](src/browse_docs.rs): `docs.rs` browser tool
+- [`prompt.txt`](prompt.txt): XML-driven workflow definition
+- [`src/lib.rs`](src/lib.rs): smoke tests guarding the example contract
+
+## Verifying The Example
+
+```bash
+cargo test -p rswarm_examples
+```
+
+Those tests cover the two example-specific regressions that previously caused confusion:
+
+- `Swarm::run(...)` must reject an empty message history
+- the seeded initial user message must remain valid
