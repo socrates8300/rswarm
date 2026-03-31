@@ -1,3 +1,12 @@
 target
 .env
 output.txt
+.claude/settings.local.json
+POSTGRES_ANALYSIS.md
+cargo
+cargo_err_output
+docs/agents/2026-03-30T10-32-36Z__phase1-completion-gate__cr.json
+docs/agents/2026-03-30T11-00-00Z__phase1-completion-gate__cr.json
+docs/agents/2026-03-30T12-00-00Z__phase1-completion-gate__cr.json
+echo
+head
