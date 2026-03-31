@@ -15,12 +15,19 @@ use crate::types::Message;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::tls::MakeTlsConnect;
+use tokio_postgres::{Client, NoTls, Socket};
+
+#[cfg(feature = "postgres-tls")]
+use {
+    rustls_native_certs::load_native_certs,
+    tokio_postgres_rustls::MakeRustlsConnect,
+};
 
 const MIGRATION_001: &str = include_str!("../../migrations/postgres/001_initial.sql");
 static MIGRATIONS: &[(&str, &str)] = &[("001", MIGRATION_001)];
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PostgresStore {
     client: Arc<Client>,
 }
@@ -39,11 +46,13 @@ impl PostgresStore {
             && !connection_string.contains("127.0.0.1")
             && !connection_string.starts_with('/');
         if looks_remote {
-            tracing::warn!(
-                "PostgresStore::connect is using NoTls but the connection string \
-                 does not appear to be localhost/Unix-socket. Credentials will be \
-                 transmitted in plaintext. Use a TLS-capable connector for remote hosts."
-            );
+            return Err(SwarmError::ConfigError(
+                "PostgresStore::connect uses NoTls and is only safe for Unix-socket \
+                 or localhost connections. For remote hosts supply a TLS connector via \
+                 PostgresStore::connect_tls, or enable the `postgres-tls` feature and \
+                 use PostgresStore::connect_with_native_roots."
+                    .to_string(),
+            ));
         }
 
         let (client, connection) = tokio_postgres::connect(connection_string, NoTls)
@@ -60,6 +69,57 @@ impl PostgresStore {
         };
         store.run_migrations().await?;
         Ok(store)
+    }
+
+    /// Connect using a caller-supplied TLS connector.
+    ///
+    /// Any type implementing [`MakeTlsConnect<Socket>`] is accepted, e.g. from
+    /// `tokio-postgres-native-tls` or `tokio-postgres-rustls`.  For a zero-config
+    /// path with system root certificates enable the `postgres-tls` feature and
+    /// use [`PostgresStore::connect_with_native_roots`].
+    pub async fn connect_tls<T>(connection_string: &str, tls: T) -> SwarmResult<Self>
+    where
+        T: MakeTlsConnect<Socket> + Send + 'static,
+        T::Stream: Send,
+        T::TlsConnect: Send,
+        <T::TlsConnect as tokio_postgres::tls::TlsConnect<Socket>>::Future: Send,
+    {
+        let (client, connection) = tokio_postgres::connect(connection_string, tls)
+            .await
+            .map_err(pg_err)?;
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                tracing::error!("postgres connection error: {}", error);
+            }
+        });
+        let store = Self {
+            client: Arc::new(client),
+        };
+        store.run_migrations().await?;
+        Ok(store)
+    }
+
+    /// Connect to a remote PostgreSQL server using TLS with the system's native
+    /// root certificate store.
+    ///
+    /// Requires the `postgres-tls` feature.  For custom trust anchors or client
+    /// certificates use [`PostgresStore::connect_tls`] with a manually constructed
+    /// `rustls::ClientConfig`.
+    #[cfg(feature = "postgres-tls")]
+    pub async fn connect_with_native_roots(connection_string: &str) -> SwarmResult<Self> {
+        let mut roots = rustls::RootCertStore::empty();
+        let certs = load_native_certs().map_err(|e| {
+            SwarmError::ConfigError(format!("failed to load native TLS certs: {e}"))
+        })?;
+        for cert in certs {
+            roots.add(cert).map_err(|e| {
+                SwarmError::ConfigError(format!("TLS root cert error: {e}"))
+            })?;
+        }
+        let tls_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        Self::connect_tls(connection_string, MakeRustlsConnect::new(tls_config)).await
     }
 
     async fn run_migrations(&self) -> SwarmResult<()> {
@@ -508,6 +568,18 @@ mod tests {
     async fn test_connect_rejects_invalid_connection_string() {
         let result = PostgresStore::connect("postgres://invalid host").await;
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn test_connect_rejects_remote_no_tls() {
+        let err = PostgresStore::connect("postgres://user:pass@db.example.com/mydb")
+            .await
+            .expect_err("remote NoTls must be rejected");
+        assert!(
+            err.to_string().contains("NoTls"),
+            "error should mention NoTls: {err}"
+        );
     }
 
     #[cfg(feature = "postgres")]
