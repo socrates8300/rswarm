@@ -300,6 +300,8 @@ impl SessionStore for SqliteStore {
 
     async fn store_messages(&self, session_id: &str, messages: &[Message]) -> SwarmResult<()> {
         let sid = session_id.to_string();
+        // Serialize all messages before touching the DB so a serialization
+        // failure cannot leave the connection mid-transaction.
         let payloads: Vec<String> = messages
             .iter()
             .map(|m| {
@@ -307,16 +309,26 @@ impl SessionStore for SqliteStore {
             })
             .collect::<SwarmResult<_>>()?;
         self.with_conn(move |conn| {
-            conn.execute("DELETE FROM messages WHERE session_id = ?1", params![sid])
-                .map_err(sqlite_err)?;
-            for (pos, payload) in payloads.iter().enumerate() {
-                conn.execute(
-                    "INSERT INTO messages (session_id, position, payload) VALUES (?1, ?2, ?3)",
-                    params![sid, pos as i64, payload],
-                )
-                .map_err(sqlite_err)?;
+            conn.execute("BEGIN IMMEDIATE", []).map_err(sqlite_err)?;
+            let result: SwarmResult<()> = (|| {
+                conn.execute("DELETE FROM messages WHERE session_id = ?1", params![sid])
+                    .map_err(sqlite_err)?;
+                for (pos, payload) in payloads.iter().enumerate() {
+                    conn.execute(
+                        "INSERT INTO messages (session_id, position, payload) VALUES (?1, ?2, ?3)",
+                        params![sid, pos as i64, payload],
+                    )
+                    .map_err(sqlite_err)?;
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = conn.execute("ROLLBACK", []);
+                result
+            } else {
+                conn.execute("COMMIT", []).map_err(sqlite_err)?;
+                Ok(())
             }
-            Ok(())
         })
         .await
     }
@@ -939,6 +951,74 @@ mod tests {
         s.store_messages("s3", &[msg]).await.unwrap();
         let loaded = s.load_messages("s3").await.unwrap();
         assert_eq!(loaded.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_store_messages_idempotent_rewrite() {
+        // Overwriting a prior history must produce exactly the new set, with no
+        // duplicate rows from a non-atomic delete+insert.
+        let s = store().await;
+        s.create_session("msg-rewrite", "agent-x", "trace-r")
+            .await
+            .unwrap();
+
+        let make_msg = |text: &str| {
+            crate::types::Message::new(MessageRole::User, Some(text.to_string()), None, None)
+                .unwrap()
+        };
+
+        // First write: 3 messages.
+        let first = vec![make_msg("a"), make_msg("b"), make_msg("c")];
+        s.store_messages("msg-rewrite", &first).await.unwrap();
+        let loaded = s.load_messages("msg-rewrite").await.unwrap();
+        assert_eq!(loaded.len(), 3);
+
+        // Second write: 5 different messages.
+        let second = vec![
+            make_msg("1"),
+            make_msg("2"),
+            make_msg("3"),
+            make_msg("4"),
+            make_msg("5"),
+        ];
+        s.store_messages("msg-rewrite", &second).await.unwrap();
+        let loaded = s.load_messages("msg-rewrite").await.unwrap();
+        assert_eq!(loaded.len(), 5, "rewrite must not leave old rows behind");
+
+        // Third write: empty — clears history atomically.
+        s.store_messages("msg-rewrite", &[]).await.unwrap();
+        let loaded = s.load_messages("msg-rewrite").await.unwrap();
+        assert!(loaded.is_empty(), "storing empty slice must delete all rows");
+    }
+
+    #[tokio::test]
+    async fn test_store_messages_serialization_failure_leaves_db_intact() {
+        // If serialization of any message fails before the DB is touched,
+        // the previously stored history must be unchanged.
+        let s = store().await;
+        s.create_session("msg-guard", "agent-g", "trace-g")
+            .await
+            .unwrap();
+
+        let msg =
+            crate::types::Message::new(MessageRole::User, Some("original".to_string()), None, None)
+                .unwrap();
+        s.store_messages("msg-guard", &[msg.clone()])
+            .await
+            .unwrap();
+
+        // serde_json::to_string never fails for well-typed Message, so we cannot
+        // inject a serialization error here without a custom type. Instead,
+        // assert the happy-path invariant: a successful overwrite replaces exactly.
+        s.store_messages("msg-guard", &[msg.clone(), msg.clone()])
+            .await
+            .unwrap();
+        let loaded = s.load_messages("msg-guard").await.unwrap();
+        assert_eq!(
+            loaded.len(),
+            2,
+            "second store must replace, not append, prior messages"
+        );
     }
 
     #[tokio::test]

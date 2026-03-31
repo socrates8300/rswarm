@@ -271,22 +271,36 @@ impl SessionStore for PostgresStore {
     }
 
     async fn store_messages(&self, session_id: &str, messages: &[Message]) -> SwarmResult<()> {
-        self.client
-            .execute("DELETE FROM messages WHERE session_id = $1", &[&session_id])
-            .await
-            .map_err(pg_err)?;
-        for (position, message) in messages.iter().enumerate() {
-            let payload = serde_json::to_value(message)
-                .map_err(|error| SwarmError::SerializationError(error.to_string()))?;
+        // Serialize all messages first so a serialization failure leaves the DB untouched.
+        let payloads: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::to_value(m)
+                    .map_err(|error| SwarmError::SerializationError(error.to_string()))
+            })
+            .collect::<SwarmResult<_>>()?;
+
+        if payloads.is_empty() {
             self.client
-                .execute(
-                    "INSERT INTO messages (session_id, position, payload)
-                     VALUES ($1, $2, $3)",
-                    &[&session_id, &(position as i64), &payload],
-                )
+                .execute("DELETE FROM messages WHERE session_id = $1", &[&session_id])
                 .await
                 .map_err(pg_err)?;
+            return Ok(());
         }
+
+        let positions: Vec<i64> = (0..payloads.len() as i64).collect();
+        // A writeable CTE executes the DELETE and INSERT as a single atomic statement —
+        // no explicit transaction needed and Arc<Client> requires no structural change.
+        self.client
+            .execute(
+                "WITH del AS (DELETE FROM messages WHERE session_id = $1)
+                 INSERT INTO messages (session_id, position, payload)
+                 SELECT $1, pos, payload
+                 FROM UNNEST($2::bigint[], $3::jsonb[]) AS t(pos, payload)",
+                &[&session_id, &positions, &payloads],
+            )
+            .await
+            .map_err(pg_err)?;
         Ok(())
     }
 
