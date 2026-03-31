@@ -37,6 +37,8 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
 }
 
 impl CompletionRequest {
@@ -51,7 +53,13 @@ impl CompletionRequest {
             temperature: None,
             max_tokens: None,
             stop: None,
+            parallel_tool_calls: None,
         }
+    }
+
+    pub fn with_parallel_tool_calls(mut self, parallel: bool) -> Self {
+        self.parallel_tool_calls = Some(parallel);
+        self
     }
 
     pub fn with_tools(mut self, tools: Vec<ToolSchema>) -> Self {

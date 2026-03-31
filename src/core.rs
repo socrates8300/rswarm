@@ -41,7 +41,7 @@ use crate::types::{
     Agent, AgentFunction, AgentRef, ApiKey, ApiUrl, ChatCompletionResponse, Choice,
     ContextVariables, FinishReason, FunctionCall, FunctionCallPolicy, Instructions, Message,
     MessageRole, ModelId, OpenAIErrorResponse, Response, ResultType, RuntimeLimits, Step, Steps,
-    SwarmConfig,
+    SwarmConfig, ToolCall, ToolCallExecution,
 };
 use crate::util::{debug_print, extract_xml_steps, function_to_json, parse_steps_from_xml};
 use crate::validation::{
@@ -1327,6 +1327,10 @@ impl Swarm {
 
             request_body["stream"] = json!(true);
 
+            if agent.tool_call_execution().is_parallel() {
+                request_body["parallel_tool_calls"] = json!(true);
+            }
+
             let url = env::var("OPENAI_API_URL")
                 .map(|url| {
                     ApiUrl::new(url, self.config.valid_api_url_prefixes())
@@ -1365,6 +1369,9 @@ impl Swarm {
             let mut fc_name = String::new();
             let mut fc_args = String::new();
             let mut finish_reason: Option<FinishReason> = None;
+            // Accumulator for multi-tool-call streaming deltas (OpenAI tool_calls API).
+            let mut tc_acc_msg =
+                Message::from_parts_unchecked(MessageRole::Assistant, None, None, None);
 
             'sse: while let Some(chunk_result) = stream.next().await {
                 let data = chunk_result.map_err(|e| {
@@ -1402,6 +1409,15 @@ impl Swarm {
                                         fc_args.push_str(args);
                                     }
                                 }
+                                if let Some(tc_arr) =
+                                    delta.get("tool_calls").and_then(|v| v.as_array())
+                                {
+                                    for tc_delta in tc_arr {
+                                        let index =
+                                            tc_delta["index"].as_u64().unwrap_or(0) as usize;
+                                        tc_acc_msg.merge_tool_call_delta(index, tc_delta);
+                                    }
+                                }
                                 if let Some(fr) = choice["finish_reason"].as_str() {
                                     finish_reason = Some(match fr {
                                         "stop" => FinishReason::Stop,
@@ -1419,22 +1435,28 @@ impl Swarm {
             }
 
             // Assemble the fully merged message from accumulated deltas.
-            let merged_fc = if !fc_name.is_empty() || !fc_args.is_empty() {
-                Some(FunctionCall::from_parts_unchecked(fc_name, fc_args))
+            tc_acc_msg.finalize_tool_calls();
+            let merged_message = if let Some(tool_calls) = tc_acc_msg.tool_calls() {
+                // Multi-tool-call streaming response.
+                Message::assistant_tool_calls(tool_calls.to_vec()).map_err(|e| {
+                    SwarmError::DeserializationError(format!(
+                        "Failed to build tool_calls message: {}",
+                        e
+                    ))
+                })?
             } else {
-                None
+                let merged_fc = if !fc_name.is_empty() || !fc_args.is_empty() {
+                    Some(FunctionCall::from_parts_unchecked(fc_name, fc_args))
+                } else {
+                    None
+                };
+                let merged_content = if !content_buf.is_empty() {
+                    Some(content_buf)
+                } else {
+                    None
+                };
+                Message::from_parts_unchecked(MessageRole::Assistant, merged_content, None, merged_fc)
             };
-            let merged_content = if !content_buf.is_empty() {
-                Some(content_buf)
-            } else {
-                None
-            };
-            let merged_message = Message::from_parts_unchecked(
-                MessageRole::Assistant,
-                merged_content,
-                None,
-                merged_fc,
-            );
             let mut full_response = ChatCompletionResponse::accumulator();
             full_response.extend_choices(vec![Choice {
                 index: 0,
@@ -1455,6 +1477,9 @@ impl Swarm {
             if !functions.is_empty() {
                 request = request.with_functions(functions, function_call_policy);
             }
+            if agent.tool_call_execution().is_parallel() {
+                request = request.with_parallel_tool_calls(true);
+            }
 
             let provider_response = self.provider.complete(request).await?;
             debug_print(
@@ -1469,28 +1494,35 @@ impl Swarm {
                 ))
             })?;
 
-            // Map tool_calls[0] → function_call for backward-compat with ChatCompletionResponse.
+            // Map tool_calls → function_call when there is exactly one tool call (backward-compat).
+            // For multiple tool calls, leave the array intact so MessageDto deserializes it into
+            // Message::tool_calls, which is dispatched by the parallel/serial execution branch.
             if let Some(choices) = json_val["choices"].as_array_mut() {
                 for choice in choices.iter_mut() {
-                    if let Some(tool_calls) = choice["message"]["tool_calls"].as_array() {
-                        if let Some(first) = tool_calls.first() {
-                            let name = first["function"]["name"].clone();
-                            let args = first["function"]["arguments"].clone();
-                            let args_str =
-                                if args.is_string() {
-                                    args.clone()
-                                } else {
-                                    Value::String(serde_json::to_string(&args).map_err(|e| {
-                                        SwarmError::DeserializationError(e.to_string())
-                                    })?)
-                                };
-                            choice["message"]["function_call"] =
-                                json!({"name": name, "arguments": args_str});
-                        }
+                    let tc_count = choice["message"]["tool_calls"]
+                        .as_array()
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    if tc_count == 1 {
+                        // Single-call: promote to function_call and remove the array (legacy path).
+                        let first = choice["message"]["tool_calls"][0].clone();
+                        let name = first["function"]["name"].clone();
+                        let args = first["function"]["arguments"].clone();
+                        let args_str = if args.is_string() {
+                            args.clone()
+                        } else {
+                            Value::String(serde_json::to_string(&args).map_err(|e| {
+                                SwarmError::DeserializationError(e.to_string())
+                            })?)
+                        };
+                        choice["message"]["function_call"] =
+                            json!({"name": name, "arguments": args_str});
                         choice["message"]
                             .as_object_mut()
                             .map(|m| m.remove("tool_calls"));
                     }
+                    // tc_count > 1: leave tool_calls in place for the multi-call dispatch path.
+                    // tc_count == 0: no-op.
                 }
             }
 
@@ -1504,7 +1536,7 @@ impl Swarm {
         &self,
         function_call: &FunctionCall,
         functions: &[AgentFunction],
-        context_variables: &mut ContextVariables,
+        context_variables: ContextVariables,
         debug: bool,
     ) -> SwarmResult<Response> {
         if function_call.name().trim().is_empty() {
@@ -1578,6 +1610,52 @@ impl Swarm {
             )?);
         }
         Ok(response)
+    }
+
+    /// Executes multiple tool calls serially, threading context from each call to the next.
+    async fn handle_tool_calls_serial(
+        &self,
+        tool_calls: &[ToolCall],
+        functions: &[AgentFunction],
+        context_variables: &ContextVariables,
+        debug: bool,
+    ) -> SwarmResult<Vec<(ToolCall, Response)>> {
+        let mut output = Vec::with_capacity(tool_calls.len());
+        let mut running_ctx = context_variables.clone();
+        for tc in tool_calls {
+            let response = self
+                .handle_function_call(tc.function(), functions, running_ctx.clone(), debug)
+                .await?;
+            running_ctx.extend(response.context_variables.clone());
+            output.push((tc.clone(), response));
+        }
+        Ok(output)
+    }
+
+    /// Executes multiple tool calls in parallel. Each call receives a clone of the current
+    /// context; results are merged in input order (last-writer-wins for conflicting keys).
+    async fn handle_tool_calls_parallel(
+        &self,
+        tool_calls: &[ToolCall],
+        functions: &[AgentFunction],
+        context_variables: &ContextVariables,
+        debug: bool,
+    ) -> SwarmResult<Vec<(ToolCall, Response)>> {
+        let futs: Vec<_> = tool_calls
+            .iter()
+            .map(|tc| {
+                let ctx = context_variables.clone();
+                let fc = tc.function().clone();
+                let fns = functions.to_vec();
+                async move { self.handle_function_call(&fc, &fns, ctx, debug).await }
+            })
+            .collect();
+        let results = futures::future::join_all(futs).await;
+        tool_calls
+            .iter()
+            .zip(results)
+            .map(|(tc, r)| r.map(|resp| (tc.clone(), resp)))
+            .collect()
     }
 
     /// Handles the result of a function call.
@@ -1892,7 +1970,7 @@ impl Swarm {
                 .handle_function_call(
                     function_call,
                     state.agent.functions(),
-                    &mut state.context_variables,
+                    state.context_variables.clone(),
                     exec.options.debug,
                 )
                 .await;
@@ -2038,6 +2116,238 @@ impl Swarm {
                         }
                     }
                     return Err(err);
+                }
+            }
+        } else if let Some(tool_calls) = message.tool_calls() {
+            if !tool_calls.is_empty() {
+                // Snapshot immutable state before any await point or mutation of `state`.
+                // Cloning here avoids holding borrows of state.agent / state.context_variables
+                // across await points, which the borrow checker would reject.
+                let functions_snapshot = state.agent.functions().to_vec();
+                let ctx_snapshot = state.context_variables.clone();
+                let execution_mode = state.agent.tool_call_execution();
+                // known_tools borrows from functions_snapshot (local), not state.agent.
+                let known_tools: Vec<&str> =
+                    functions_snapshot.iter().map(|f| f.name()).collect();
+
+                // Pre-execution: circuit breaker check per call
+                for tc in tool_calls {
+                    let breaker = self.get_tool_breaker(tc.function().name())?;
+                    let snap_before = breaker.state_snapshot();
+                    let is_open = breaker.is_open();
+                    let snap_after = breaker.state_snapshot();
+                    if snap_after != snap_before {
+                        self.emit_breaker_event(
+                            exec.trace_id,
+                            &breaker,
+                            snap_after.clone(),
+                            None,
+                        )
+                        .await;
+                    }
+                    if is_open {
+                        return Err(SwarmError::Other(format!(
+                            "Tool circuit breaker '{}' is open",
+                            breaker.name()
+                        )));
+                    }
+                }
+
+                // Emit ToolCall events
+                for tc in tool_calls {
+                    let arguments = serde_json::from_str(tc.function().arguments())
+                        .unwrap_or(Value::Null);
+                    let (_, sanitized_arguments) = self.sanitize_json_value(&arguments);
+                    self.emit(AgentEvent::ToolCall {
+                        trace_id: exec.trace_id.clone(),
+                        tool_name: tc.function().name().to_string(),
+                        arguments: sanitized_arguments,
+                        timestamp: Utc::now(),
+                    })
+                    .await;
+                }
+
+                self.check_budget(exec.trace_id, exec.budget).await?;
+
+                let tool_start = Instant::now();
+                let batch_result = match execution_mode {
+                    ToolCallExecution::Parallel => {
+                        self.handle_tool_calls_parallel(
+                            tool_calls,
+                            &functions_snapshot,
+                            &ctx_snapshot,
+                            exec.options.debug,
+                        )
+                        .await
+                    }
+                    ToolCallExecution::Serial => {
+                        self.handle_tool_calls_serial(
+                            tool_calls,
+                            &functions_snapshot,
+                            &ctx_snapshot,
+                            exec.options.debug,
+                        )
+                        .await
+                    }
+                };
+                let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
+
+                match batch_result {
+                    Ok(results) => {
+                        for (tc, func_response) in results {
+                            exec.budget.increment_tool_calls();
+                            let tool_result_content = func_response
+                                .messages
+                                .first()
+                                .and_then(|m| {
+                                    m.content().map(|c| Value::String(c.to_string()))
+                                })
+                                .unwrap_or(Value::Null);
+                            let tool_success = !tool_result_content
+                                .as_str()
+                                .map(|c| c.starts_with("Error:"))
+                                .unwrap_or(false);
+
+                            let breaker = self.get_tool_breaker(tc.function().name())?;
+                            if tool_success {
+                                let snap_before = breaker.state_snapshot();
+                                breaker.record_success();
+                                let snap_after = breaker.state_snapshot();
+                                if snap_after != snap_before {
+                                    self.emit_breaker_event(
+                                        exec.trace_id,
+                                        &breaker,
+                                        snap_after,
+                                        None,
+                                    )
+                                    .await;
+                                }
+                            } else {
+                                let snap_before = breaker.state_snapshot();
+                                let snap_after = breaker.record_failure();
+                                if snap_after != snap_before {
+                                    self.emit_breaker_event(
+                                        exec.trace_id,
+                                        &breaker,
+                                        snap_after,
+                                        Some("tool returned an error response".to_string()),
+                                    )
+                                    .await;
+                                }
+                            }
+
+                            let (classification, sanitized_result) =
+                                self.sanitize_json_value(&tool_result_content);
+                            self.emit(AgentEvent::ToolResult {
+                                trace_id: exec.trace_id.clone(),
+                                tool_name: tc.function().name().to_string(),
+                                result: sanitized_result,
+                                success: tool_success,
+                                duration_ms: tool_duration_ms,
+                                timestamp: Utc::now(),
+                            })
+                            .await;
+                            record_tool_call(
+                                tc.function().name(),
+                                tool_duration_ms as f64,
+                                tool_success,
+                            );
+
+                            if let Some(content) = tool_result_content.as_str() {
+                                self.enforce_content_policy(
+                                    exec.trace_id,
+                                    content,
+                                    "tool_result",
+                                )
+                                .await?;
+                                self.persist_memory_hook(
+                                    exec.trace_id,
+                                    &format!(
+                                        "tool:{}:{}",
+                                        tc.function().name(),
+                                        state.iterations
+                                    ),
+                                    content,
+                                    "tool_result",
+                                )
+                                .await;
+                            } else if let Some(cls) = classification {
+                                self.emit_guardrail_event(
+                                    exec.trace_id,
+                                    "tool_result_redaction",
+                                    "redact",
+                                    "non-string tool result redacted for audit storage",
+                                    Some(cls),
+                                )
+                                .await;
+                            }
+
+                            if let Some(trigger) = exec.escalation.record_tool_call(
+                                tc.function().name(),
+                                tool_success,
+                                &known_tools,
+                                tc.function().arguments(),
+                            ) {
+                                if let Some(reason) =
+                                    self.apply_escalation_trigger(state, exec, trigger).await?
+                                {
+                                    termination_reason = Some(reason);
+                                }
+                            }
+
+                            // Push tool result to history with tool_call_id linkage.
+                            let result_str = tool_result_content
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("null")
+                                .to_string();
+                            state
+                                .history
+                                .push(Message::tool_result(tc.id(), result_str)?);
+                            state
+                                .context_variables
+                                .extend(func_response.context_variables);
+                            if let Some(agent) = func_response.agent {
+                                exec.budget.increment_depth();
+                                self.check_budget(exec.trace_id, exec.budget).await?;
+                                state.agent = agent;
+                            }
+                            if let Some(reason) = func_response.termination_reason {
+                                termination_reason = Some(reason);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        for tc in tool_calls {
+                            let breaker = self.get_tool_breaker(tc.function().name())?;
+                            let snap_before = breaker.state_snapshot();
+                            let snap_after = breaker.record_failure();
+                            if snap_after != snap_before {
+                                self.emit_breaker_event(
+                                    exec.trace_id,
+                                    &breaker,
+                                    snap_after,
+                                    Some(err.to_string()),
+                                )
+                                .await;
+                            }
+                            self.emit(AgentEvent::ToolResult {
+                                trace_id: exec.trace_id.clone(),
+                                tool_name: tc.function().name().to_string(),
+                                result: Value::String(err.to_string()),
+                                success: false,
+                                duration_ms: tool_duration_ms,
+                                timestamp: Utc::now(),
+                            })
+                            .await;
+                            record_tool_call(
+                                tc.function().name(),
+                                tool_duration_ms as f64,
+                                false,
+                            );
+                        }
+                        return Err(err);
+                    }
                 }
             }
         }

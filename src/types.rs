@@ -1102,6 +1102,7 @@ pub enum MessageRole {
     User,
     Assistant,
     Function,
+    Tool,
 }
 
 impl MessageRole {
@@ -1111,6 +1112,7 @@ impl MessageRole {
             Self::User => "user",
             Self::Assistant => "assistant",
             Self::Function => "function",
+            Self::Tool => "tool",
         }
     }
 }
@@ -1195,13 +1197,137 @@ impl<'de> Deserialize<'de> for FunctionCall {
     }
 }
 
+/// A single tool call within an assistant message (OpenAI tool_calls API format).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: FunctionCall,
+}
+
+#[derive(Deserialize)]
+struct ToolCallDto {
+    #[serde(default)]
+    id: String,
+    #[serde(rename = "type", default)]
+    call_type: String,
+    function: FunctionCall,
+}
+
+impl ToolCall {
+    pub fn new(id: impl Into<String>, function: FunctionCall) -> SwarmResult<Self> {
+        let id = id.into();
+        if id.trim().is_empty() {
+            return Err(SwarmError::ValidationError(
+                "ToolCall id cannot be empty".to_string(),
+            ));
+        }
+        Ok(Self {
+            id,
+            call_type: "function".to_string(),
+            function,
+        })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn call_type(&self) -> &str {
+        &self.call_type
+    }
+
+    pub fn function(&self) -> &FunctionCall {
+        &self.function
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolCall {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let dto = ToolCallDto::deserialize(deserializer)?;
+        Ok(Self {
+            id: dto.id,
+            call_type: if dto.call_type.is_empty() {
+                "function".to_string()
+            } else {
+                dto.call_type
+            },
+            function: dto.function,
+        })
+    }
+}
+
+/// Transient accumulator for a single tool call during streaming.
+/// Never serialized — drained into `Message::tool_calls` by `finalize_tool_calls()`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ToolCallAccumulator {
+    id: String,
+    call_type: String,
+    name: String,
+    arguments: String,
+}
+
+impl ToolCallAccumulator {
+    fn new() -> Self {
+        Self {
+            id: String::new(),
+            call_type: "function".to_string(),
+            name: String::new(),
+            arguments: String::new(),
+        }
+    }
+
+    fn merge_delta(&mut self, delta: &Value) {
+        if let Some(id) = delta.get("id").and_then(|v| v.as_str()) {
+            self.id.push_str(id);
+        }
+        if let Some(ct) = delta.get("type").and_then(|v| v.as_str()) {
+            if !ct.is_empty() {
+                self.call_type = ct.to_string();
+            }
+        }
+        if let Some(func) = delta.get("function") {
+            if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                self.name.push_str(name);
+            }
+            if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
+                self.arguments.push_str(args);
+            }
+        }
+    }
+
+    fn into_tool_call(self) -> ToolCall {
+        ToolCall {
+            id: self.id,
+            call_type: self.call_type,
+            function: FunctionCall::from_parts_unchecked(self.name, self.arguments),
+        }
+    }
+}
+
 /// Represents a chat message.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Message {
     role: MessageRole,
+    #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     function_call: Option<FunctionCall>,
+    /// Multi-call tool invocations (OpenAI tool_calls API). Present on assistant messages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ToolCall>>,
+    /// Links a tool-role result message back to its originating call id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    /// Transient streaming accumulator — never serialized or deserialized.
+    #[serde(skip)]
+    tool_call_accumulators: HashMap<usize, ToolCallAccumulator>,
 }
 
 #[derive(Deserialize)]
@@ -1210,6 +1336,10 @@ struct MessageDto {
     content: Option<String>,
     name: Option<String>,
     function_call: Option<FunctionCall>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCall>>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
 }
 
 impl Message {
@@ -1224,6 +1354,47 @@ impl Message {
             content,
             name,
             function_call,
+            tool_calls: None,
+            tool_call_id: None,
+            tool_call_accumulators: HashMap::new(),
+        };
+        message.validate()?;
+        Ok(message)
+    }
+
+    /// Creates an assistant message carrying multiple parallel tool call invocations.
+    pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> SwarmResult<Self> {
+        if tool_calls.is_empty() {
+            return Err(SwarmError::ValidationError(
+                "assistant_tool_calls requires at least one tool call".to_string(),
+            ));
+        }
+        let message = Self {
+            role: MessageRole::Assistant,
+            content: None,
+            name: None,
+            function_call: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+            tool_call_accumulators: HashMap::new(),
+        };
+        message.validate()?;
+        Ok(message)
+    }
+
+    /// Creates a tool-role result message linking content back to a specific call id.
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+    ) -> SwarmResult<Self> {
+        let message = Self {
+            role: MessageRole::Tool,
+            content: Some(content.into()),
+            name: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+            tool_call_accumulators: HashMap::new(),
         };
         message.validate()?;
         Ok(message)
@@ -1282,6 +1453,14 @@ impl Message {
         self.function_call.as_ref()
     }
 
+    pub fn tool_calls(&self) -> Option<&[ToolCall]> {
+        self.tool_calls.as_deref()
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+
     pub fn validate(&self) -> SwarmResult<()> {
         if let Some(content) = &self.content {
             if content.trim().is_empty() {
@@ -1318,19 +1497,44 @@ impl Message {
                         self.role
                     )));
                 }
+                if self.tool_calls.is_some() {
+                    return Err(SwarmError::ValidationError(format!(
+                        "{} messages cannot include tool calls",
+                        self.role
+                    )));
+                }
+                if self.tool_call_id.is_some() {
+                    return Err(SwarmError::ValidationError(format!(
+                        "{} messages cannot include tool_call_id",
+                        self.role
+                    )));
+                }
             }
             MessageRole::Assistant => {
                 let has_content = self.content.is_some();
                 let has_function_call = self.function_call.is_some();
-                if has_content == has_function_call {
+                let has_tool_calls = self
+                    .tool_calls
+                    .as_ref()
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+                // Exactly one of: content, function_call, tool_calls
+                let variant_count =
+                    has_content as u8 + has_function_call as u8 + has_tool_calls as u8;
+                if variant_count != 1 {
                     return Err(SwarmError::ValidationError(
-                        "Assistant messages must contain either content or a function call"
+                        "Assistant messages must contain exactly one of: content, function_call, or tool_calls"
                             .to_string(),
                     ));
                 }
-                if has_function_call && self.name.is_some() {
+                if (has_function_call || has_tool_calls) && self.name.is_some() {
                     return Err(SwarmError::ValidationError(
-                        "Assistant function-call messages cannot set name".to_string(),
+                        "Assistant tool-call messages cannot set name".to_string(),
+                    ));
+                }
+                if self.tool_call_id.is_some() {
+                    return Err(SwarmError::ValidationError(
+                        "Assistant messages cannot include tool_call_id".to_string(),
                     ));
                 }
             }
@@ -1350,6 +1554,43 @@ impl Message {
                         "Function messages cannot include function calls".to_string(),
                     ));
                 }
+                if self.tool_calls.is_some() {
+                    return Err(SwarmError::ValidationError(
+                        "Function messages cannot include tool_calls".to_string(),
+                    ));
+                }
+                if self.tool_call_id.is_some() {
+                    return Err(SwarmError::ValidationError(
+                        "Function messages cannot include tool_call_id".to_string(),
+                    ));
+                }
+            }
+            MessageRole::Tool => {
+                if self.content.is_none() {
+                    return Err(SwarmError::ValidationError(
+                        "Tool messages require content".to_string(),
+                    ));
+                }
+                if self.tool_call_id.is_none() {
+                    return Err(SwarmError::ValidationError(
+                        "Tool messages require tool_call_id".to_string(),
+                    ));
+                }
+                if self.name.is_some() {
+                    return Err(SwarmError::ValidationError(
+                        "Tool messages cannot set name".to_string(),
+                    ));
+                }
+                if self.function_call.is_some() {
+                    return Err(SwarmError::ValidationError(
+                        "Tool messages cannot include function_call".to_string(),
+                    ));
+                }
+                if self.tool_calls.is_some() {
+                    return Err(SwarmError::ValidationError(
+                        "Tool messages cannot include tool_calls".to_string(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -1366,6 +1607,9 @@ impl Message {
             content,
             name,
             function_call,
+            tool_calls: None,
+            tool_call_id: None,
+            tool_call_accumulators: HashMap::new(),
         }
     }
 
@@ -1386,6 +1630,32 @@ impl Message {
         });
         function_call.merge_delta(delta);
     }
+
+    /// Accumulates a streaming tool_calls delta chunk at the given array index.
+    pub(crate) fn merge_tool_call_delta(&mut self, index: usize, delta: &Value) {
+        self.tool_call_accumulators
+            .entry(index)
+            .or_insert_with(ToolCallAccumulator::new)
+            .merge_delta(delta);
+    }
+
+    /// Drains the streaming accumulators into `self.tool_calls`.
+    /// Call this after the SSE `[DONE]` sentinel.
+    pub(crate) fn finalize_tool_calls(&mut self) {
+        if self.tool_call_accumulators.is_empty() {
+            return;
+        }
+        let mut indices: Vec<usize> = self.tool_call_accumulators.keys().copied().collect();
+        indices.sort_unstable();
+        let calls: Vec<ToolCall> = indices
+            .into_iter()
+            .filter_map(|i| self.tool_call_accumulators.remove(&i))
+            .map(ToolCallAccumulator::into_tool_call)
+            .collect();
+        if !calls.is_empty() {
+            self.tool_calls = Some(calls);
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for Message {
@@ -1394,7 +1664,17 @@ impl<'de> Deserialize<'de> for Message {
         D: Deserializer<'de>,
     {
         let dto = MessageDto::deserialize(deserializer)?;
-        Self::new(dto.role, dto.content, dto.name, dto.function_call).map_err(de::Error::custom)
+        let msg = Self {
+            role: dto.role,
+            content: dto.content,
+            name: dto.name,
+            function_call: dto.function_call,
+            tool_calls: dto.tool_calls,
+            tool_call_id: dto.tool_call_id,
+            tool_call_accumulators: HashMap::new(),
+        };
+        msg.validate().map_err(de::Error::custom)?;
+        Ok(msg)
     }
 }
 
