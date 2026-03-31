@@ -36,9 +36,9 @@ pub struct SqliteVssMemory {
 impl SqliteVssMemory {
     /// Create a persistent store at `db_path`.
     ///
-    /// **Important:** Without the `sqlite-vec` feature this falls back to an
-    /// in-memory store — **all writes are lost on process exit**.  Enable the
-    /// real adapter before relying on this API for durable storage.
+    /// Requires the `sqlite-vec` feature. Returns a [`SwarmError::ConfigError`]
+    /// in all other cases — the adapter is not yet implemented, or the feature
+    /// is disabled. Use [`SqliteVssMemory::in_memory`] for a non-persistent store.
     pub fn open(db_path: impl Into<String>) -> SwarmResult<Self> {
         let path = db_path.into();
         #[cfg(feature = "sqlite-vec")]
@@ -51,16 +51,11 @@ impl SqliteVssMemory {
         }
         #[cfg(not(feature = "sqlite-vec"))]
         {
-            tracing::warn!(
-                "sqlite-vec feature disabled; SqliteVssMemory at '{}' will NOT persist data \
-                 — all writes are lost on process exit",
+            Err(crate::error::SwarmError::ConfigError(format!(
+                "SqliteVssMemory::open('{}') requires the 'sqlite-vec' feature; \
+                 use SqliteVssMemory::in_memory() for a non-persistent store",
                 path
-            );
-            Ok(Self {
-                inner: InMemoryVectorStore::new(),
-                db_path: Some(path),
-                persistent: false,
-            })
+            )))
         }
     }
 
@@ -137,9 +132,12 @@ mod tests {
 
     #[cfg(not(feature = "sqlite-vec"))]
     #[test]
-    fn test_open_reports_non_persistent_fallback() {
-        let store = SqliteVssMemory::open("memory.db").expect("fallback store");
-        assert!(!store.is_persistent());
+    fn test_open_requires_feature() {
+        let err = match SqliteVssMemory::open("memory.db") {
+            Ok(_) => panic!("open without feature must fail"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("sqlite-vec' feature"));
     }
 
     #[cfg(feature = "sqlite-vec")]

@@ -75,6 +75,11 @@ pub fn validate_api_request(
     }
 
     // Validate messages
+    if messages.is_empty() {
+        return Err(SwarmError::ValidationError(
+            "Message history cannot be empty".to_string(),
+        ));
+    }
     for message in messages {
         message.validate()?;
     }

@@ -71,6 +71,15 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_api_request_rejects_empty_history() {
+        let agent = test_agent();
+        let error = validate_api_request(&agent, &[], &None, 1)
+            .expect_err("empty history should fail preflight validation");
+        assert!(matches!(error, SwarmError::ValidationError(_)));
+        assert!(error.to_string().to_lowercase().contains("empty"));
+    }
+
+    #[test]
     fn test_validate_api_request_rejects_structurally_invalid_messages() {
         let agent = test_agent();
         let invalid_empty_assistant =

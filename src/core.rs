@@ -1282,6 +1282,7 @@ impl Swarm {
         stream: bool,
         debug: bool,
     ) -> SwarmResult<ChatCompletionResponse> {
+        // Defense-in-depth: preflight (validate_api_request) is the authoritative check.
         if history.is_empty() {
             return Err(SwarmError::ValidationError(
                 "Message history cannot be empty".to_string(),
