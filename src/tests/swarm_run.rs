@@ -2,7 +2,6 @@
 use crate::core::Swarm;
 use crate::types::{Agent, ContextVariables, Instructions, Message};
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use openai_mock::routes::configure_completion_routes;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -60,9 +59,7 @@ async fn completions_mock_handler(req_body: web::Json<Value>) -> impl Responder 
 /// with a custom handler for the `/completions` endpoint.
 async fn setup_mock_server() -> anyhow::Result<actix_web::dev::Server> {
     let server = HttpServer::new(|| {
-        App::new()
-            .configure(configure_completion_routes)
-            .route("/completions", web::post().to(completions_mock_handler))
+        App::new().route("/completions", web::post().to(completions_mock_handler))
     })
     .bind(("127.0.0.1", 8000))?
     .run();
@@ -80,9 +77,7 @@ mod tests {
     async fn test_simple_conversation() -> anyhow::Result<()> {
         // Initialize the mock service
         let app = test::init_service(
-            App::new()
-                .configure(configure_completion_routes)
-                .route("/completions", web::post().to(completions_mock_handler)),
+            App::new().route("/completions", web::post().to(completions_mock_handler)),
         )
         .await;
 

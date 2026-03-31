@@ -988,7 +988,10 @@ mod tests {
         // Third write: empty — clears history atomically.
         s.store_messages("msg-rewrite", &[]).await.unwrap();
         let loaded = s.load_messages("msg-rewrite").await.unwrap();
-        assert!(loaded.is_empty(), "storing empty slice must delete all rows");
+        assert!(
+            loaded.is_empty(),
+            "storing empty slice must delete all rows"
+        );
     }
 
     #[tokio::test]
@@ -1003,7 +1006,7 @@ mod tests {
         let msg =
             crate::types::Message::new(MessageRole::User, Some("original".to_string()), None, None)
                 .unwrap();
-        s.store_messages("msg-guard", &[msg.clone()])
+        s.store_messages("msg-guard", std::slice::from_ref(&msg))
             .await
             .unwrap();
 

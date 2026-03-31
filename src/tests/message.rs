@@ -115,8 +115,7 @@ mod tests {
 
     #[test]
     fn test_tool_result_message_valid_and_serializes_correctly() {
-        let msg = Message::tool_result("call_abc123", "42")
-            .expect("tool_result should be valid");
+        let msg = Message::tool_result("call_abc123", "42").expect("tool_result should be valid");
         assert_eq!(msg.role(), MessageRole::Tool);
         assert_eq!(msg.content(), Some("42"));
         assert_eq!(msg.tool_call_id(), Some("call_abc123"));
@@ -135,8 +134,8 @@ mod tests {
         use crate::types::{FunctionCall, ToolCall};
         let fc = FunctionCall::new("my_tool", "{\"x\":1}").expect("fc");
         let tc = ToolCall::new("call_xyz", fc).expect("tc");
-        let msg = Message::assistant_tool_calls(vec![tc])
-            .expect("assistant_tool_calls should be valid");
+        let msg =
+            Message::assistant_tool_calls(vec![tc]).expect("assistant_tool_calls should be valid");
         assert_eq!(msg.role(), MessageRole::Assistant);
         assert!(msg.content().is_none());
         assert!(msg.function_call().is_none());
@@ -155,7 +154,9 @@ mod tests {
             None,
             None,
         );
-        let err = msg.validate().expect_err("Tool message without tool_call_id must fail");
+        let err = msg
+            .validate()
+            .expect_err("Tool message without tool_call_id must fail");
         assert!(err.to_string().contains("tool_call_id"));
     }
 
@@ -194,8 +195,7 @@ mod tests {
 
     #[test]
     fn test_tool_call_delta_streaming_accumulation() {
-        let mut msg =
-            Message::from_parts_unchecked(MessageRole::Assistant, None, None, None);
+        let mut msg = Message::from_parts_unchecked(MessageRole::Assistant, None, None, None);
 
         // Simulate OpenAI streaming: index 0 first chunk (name), then args
         let chunk1 = serde_json::json!({"index": 0, "id": "call_aaa", "type": "function",
@@ -212,7 +212,9 @@ mod tests {
         msg.merge_tool_call_delta(1, &chunk4);
         msg.finalize_tool_calls();
 
-        let calls = msg.tool_calls().expect("should have 2 tool calls after finalization");
+        let calls = msg
+            .tool_calls()
+            .expect("should have 2 tool calls after finalization");
         assert_eq!(calls.len(), 2, "expected 2 calls, got {}", calls.len());
         assert_eq!(calls[0].id(), "call_aaa");
         assert_eq!(calls[0].function().name(), "weather");

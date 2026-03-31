@@ -243,6 +243,10 @@ impl BudgetEnforcer {
 /// `schema` is the `parameters` field of a `ToolSchema` — a JSON Schema object.
 /// Returns `Ok(())` if all required fields are present or if `required` is
 /// absent from the schema.
+///
+/// This is a lightweight pre-registration check. Full JSON Schema validation
+/// (including `enum`, `items`, numeric bounds, string constraints, etc.) is
+/// performed at runtime via [`crate::tool::InvocationArgs::validate_against_schema`].
 pub fn verify_tool_arguments(args: &Value, schema: &Value) -> SwarmResult<()> {
     let required = match schema.get("required").and_then(|v| v.as_array()) {
         Some(r) => r,

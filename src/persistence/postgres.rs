@@ -19,10 +19,7 @@ use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{Client, NoTls, Socket};
 
 #[cfg(feature = "postgres-tls")]
-use {
-    rustls_native_certs::load_native_certs,
-    tokio_postgres_rustls::MakeRustlsConnect,
-};
+use {rustls_native_certs::load_native_certs, tokio_postgres_rustls::MakeRustlsConnect};
 
 const MIGRATION_001: &str = include_str!("../../migrations/postgres/001_initial.sql");
 static MIGRATIONS: &[(&str, &str)] = &[("001", MIGRATION_001)];
@@ -108,13 +105,17 @@ impl PostgresStore {
     #[cfg(feature = "postgres-tls")]
     pub async fn connect_with_native_roots(connection_string: &str) -> SwarmResult<Self> {
         let mut roots = rustls::RootCertStore::empty();
-        let certs = load_native_certs().map_err(|e| {
-            SwarmError::ConfigError(format!("failed to load native TLS certs: {e}"))
-        })?;
-        for cert in certs {
-            roots.add(cert).map_err(|e| {
-                SwarmError::ConfigError(format!("TLS root cert error: {e}"))
-            })?;
+        let certs = load_native_certs();
+        if !certs.errors.is_empty() {
+            return Err(SwarmError::ConfigError(format!(
+                "failed to load native TLS certs: {:?}",
+                certs.errors
+            )));
+        }
+        for cert in certs.certs {
+            roots
+                .add(cert)
+                .map_err(|e| SwarmError::ConfigError(format!("TLS root cert error: {e}")))?;
         }
         let tls_config = rustls::ClientConfig::builder()
             .with_root_certificates(roots)

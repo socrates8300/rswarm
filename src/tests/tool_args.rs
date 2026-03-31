@@ -80,6 +80,100 @@ mod tests {
     }
 
     #[test]
+    fn test_schema_validation_supports_common_jsonschema_keywords() {
+        let schema = ToolSchema {
+            name: "search".to_string(),
+            description: "Searches documents".to_string(),
+            parameters: json!({
+                "type": "object",
+                "required": ["mode", "tags", "limit", "label"],
+                "additionalProperties": false,
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["fast", "safe"]
+                    },
+                    "tags": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "string",
+                            "maxLength": 6
+                        }
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 3
+                    },
+                    "label": {
+                        "type": "string",
+                        "maxLength": 5
+                    }
+                }
+            }),
+        };
+
+        let valid = InvocationArgs::from_value(json!({
+            "mode": "fast",
+            "tags": ["rust"],
+            "limit": 2,
+            "label": "ship"
+        }))
+        .expect("valid args should parse");
+        schema
+            .validate_args(&valid)
+            .expect("draft-7 keywords should be enforced for valid args");
+
+        let invalid_enum = InvocationArgs::from_value(json!({
+            "mode": "turbo",
+            "tags": ["rust"],
+            "limit": 2,
+            "label": "ship"
+        }))
+        .expect("invalid enum args should parse");
+        let invalid_items = InvocationArgs::from_value(json!({
+            "mode": "fast",
+            "tags": ["toolong"],
+            "limit": 2,
+            "label": "ship"
+        }))
+        .expect("invalid item args should parse");
+        let invalid_bounds = InvocationArgs::from_value(json!({
+            "mode": "fast",
+            "tags": ["rust"],
+            "limit": 9,
+            "label": "ship"
+        }))
+        .expect("invalid bounds args should parse");
+        let invalid_extra = InvocationArgs::from_value(json!({
+            "mode": "fast",
+            "tags": ["rust"],
+            "limit": 2,
+            "label": "ship",
+            "extra": true
+        }))
+        .expect("invalid extra-property args should parse");
+
+        assert!(matches!(
+            schema.validate_args(&invalid_enum),
+            Err(ToolError::Validation(_))
+        ));
+        assert!(matches!(
+            schema.validate_args(&invalid_items),
+            Err(ToolError::Validation(_))
+        ));
+        assert!(matches!(
+            schema.validate_args(&invalid_bounds),
+            Err(ToolError::Validation(_))
+        ));
+        assert!(matches!(
+            schema.validate_args(&invalid_extra),
+            Err(ToolError::Validation(_))
+        ));
+    }
+
+    #[test]
     fn test_invocation_args_bridge_to_context_variables() {
         let args = InvocationArgs::from_value(json!({
             "query": "rust",

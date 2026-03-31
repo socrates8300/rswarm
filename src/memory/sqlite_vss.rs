@@ -5,9 +5,9 @@
 //! Enable the `sqlite-vec` feature in Cargo.toml and uncomment
 //! the `sqlite_vec` optional dependency.
 //!
-//! Without the feature, this module exposes [`SqliteVssMemory`] as a
-//! **transparent fallback** to [`InMemoryVectorStore`] so callers compile
-//! and work identically — they just don't get on-disk persistence.
+//! Without the feature, callers can still use [`SqliteVssMemory::in_memory`],
+//! but [`SqliteVssMemory::open`] returns a configuration error instead of
+//! silently downgrading to non-persistent storage.
 //!
 //! # Feature-enabled path (not yet wired)
 //!
@@ -24,8 +24,8 @@ use serde_json::Value;
 
 /// Embedded vector store backed by sqlite-vec.
 ///
-/// Falls back to [`InMemoryVectorStore`] when the `sqlite-vec` feature is
-/// disabled, so downstream code compiles and runs without the native extension.
+/// The persistent adapter is still gated behind the `sqlite-vec` feature.
+/// Call [`SqliteVssMemory::in_memory`] explicitly when persistence is not needed.
 pub struct SqliteVssMemory {
     inner: InMemoryVectorStore,
     #[allow(dead_code)]
@@ -36,7 +36,7 @@ pub struct SqliteVssMemory {
 impl SqliteVssMemory {
     /// Create a persistent store at `db_path`.
     ///
-    /// Requires the `sqlite-vec` feature. Returns a [`SwarmError::ConfigError`]
+    /// Requires the `sqlite-vec` feature. Returns a [`crate::error::SwarmError::ConfigError`]
     /// in all other cases — the adapter is not yet implemented, or the feature
     /// is disabled. Use [`SqliteVssMemory::in_memory`] for a non-persistent store.
     pub fn open(db_path: impl Into<String>) -> SwarmResult<Self> {

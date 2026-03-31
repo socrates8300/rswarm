@@ -8,6 +8,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::core::Swarm;
+    use crate::error::SwarmError;
     use crate::event::{AgentEvent, EventSubscriber};
     use crate::types::{
         Agent, AgentFunction, AgentFunctionHandler, ContextVariables, Instructions, Message,
@@ -50,6 +51,15 @@ mod tests {
         AgentFunction::new(name, handler, false).expect("AgentFunction::new")
     }
 
+    fn failing_fn(name: &str, error: &str) -> AgentFunction {
+        let error = error.to_string();
+        let handler: Arc<AgentFunctionHandler> = Arc::new(move |_ctx: ContextVariables| {
+            let err = error.clone();
+            Box::pin(async move { Err(SwarmError::AgentError(err)) })
+        });
+        AgentFunction::new(name, handler, false).expect("AgentFunction::new")
+    }
+
     fn parallel_agent(name: &str) -> Agent {
         Agent::new(
             name,
@@ -57,7 +67,10 @@ mod tests {
             Instructions::Text("You are a test agent.".to_string()),
         )
         .expect("Agent::new")
-        .with_functions(vec![simple_fn("tool_a", "result_a"), simple_fn("tool_b", "result_b")])
+        .with_functions(vec![
+            simple_fn("tool_a", "result_a"),
+            simple_fn("tool_b", "result_b"),
+        ])
         .with_tool_call_execution(ToolCallExecution::Parallel)
     }
 
@@ -68,7 +81,39 @@ mod tests {
             Instructions::Text("You are a test agent.".to_string()),
         )
         .expect("Agent::new")
-        .with_functions(vec![simple_fn("tool_a", "result_a"), simple_fn("tool_b", "result_b")])
+        .with_functions(vec![
+            simple_fn("tool_a", "result_a"),
+            simple_fn("tool_b", "result_b"),
+        ])
+        .with_tool_call_execution(ToolCallExecution::Serial)
+    }
+
+    fn parallel_agent_with_failure(name: &str) -> Agent {
+        Agent::new(
+            name,
+            "gpt-4",
+            Instructions::Text("You are a test agent.".to_string()),
+        )
+        .expect("Agent::new")
+        .with_functions(vec![
+            simple_fn("tool_a", "result_a"),
+            failing_fn("explode", "boom"),
+        ])
+        .with_tool_call_execution(ToolCallExecution::Parallel)
+    }
+
+    fn serial_agent_with_failure(name: &str) -> Agent {
+        Agent::new(
+            name,
+            "gpt-4",
+            Instructions::Text("You are a test agent.".to_string()),
+        )
+        .expect("Agent::new")
+        .with_functions(vec![
+            simple_fn("tool_a", "result_a"),
+            failing_fn("explode", "boom"),
+            simple_fn("tool_b", "result_b"),
+        ])
         .with_tool_call_execution(ToolCallExecution::Serial)
     }
 
@@ -103,9 +148,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(two_tool_calls_response()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(two_tool_calls_response()))
             .mount(&mock_server)
             .await;
 
@@ -142,7 +185,11 @@ mod tests {
             .filter(|e| matches!(e, AgentEvent::ToolResult { .. }))
             .count();
 
-        assert_eq!(tool_call_count, 2, "expected 2 ToolCall events; got {}", tool_call_count);
+        assert_eq!(
+            tool_call_count, 2,
+            "expected 2 ToolCall events; got {}",
+            tool_call_count
+        );
         assert_eq!(
             tool_result_count, 2,
             "expected 2 ToolResult events; got {}",
@@ -162,8 +209,14 @@ mod tests {
             tool_results.len()
         );
         let contents: Vec<_> = tool_results.iter().filter_map(|m| m.content()).collect();
-        assert!(contents.contains(&"result_a"), "expected result_a in tool results");
-        assert!(contents.contains(&"result_b"), "expected result_b in tool results");
+        assert!(
+            contents.contains(&"result_a"),
+            "expected result_a in tool results"
+        );
+        assert!(
+            contents.contains(&"result_b"),
+            "expected result_b in tool results"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -174,9 +227,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(two_tool_calls_response()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(two_tool_calls_response()))
             .mount(&mock_server)
             .await;
 
@@ -208,7 +259,11 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, AgentEvent::ToolCall { .. }))
             .count();
-        assert_eq!(tool_call_count, 2, "expected 2 ToolCall events; got {}", tool_call_count);
+        assert_eq!(
+            tool_call_count, 2,
+            "expected 2 ToolCall events; got {}",
+            tool_call_count
+        );
 
         let tool_results: Vec<_> = response
             .messages
@@ -285,9 +340,10 @@ mod tests {
         assert_eq!(tool_call_count, 1, "expected exactly 1 ToolCall event");
 
         // Legacy path: result is in a function-role message (not tool_call_id)
-        let has_result = response.messages.iter().any(|m| {
-            m.content() == Some("result_a")
-        });
+        let has_result = response
+            .messages
+            .iter()
+            .any(|m| m.content() == Some("result_a"));
         assert!(has_result, "expected 'result_a' in response messages");
     }
 
@@ -380,6 +436,146 @@ mod tests {
             response.context_variables.get("key_b").map(String::as_str),
             Some("val_b"),
             "key_b missing from merged context"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parallel_mixed_tool_results_preserve_success_and_failure_events() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cmpl-mixed-parallel",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-4",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"id": "m1", "type": "function",
+                             "function": {"name": "tool_a", "arguments": "{}"}},
+                            {"id": "m2", "type": "function",
+                             "function": {"name": "explode", "arguments": "{}"}}
+                        ]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let collector = CollectingSubscriber::new();
+        let agent = parallel_agent_with_failure("parallel-mixed");
+        let swarm = Swarm::builder()
+            .with_api_key("sk-test".to_string())
+            .with_api_url(mock_server.uri())
+            .with_agent(agent.clone())
+            .with_subscriber(collector.clone())
+            .build()
+            .expect("swarm build");
+
+        let error = swarm
+            .run(
+                agent,
+                vec![Message::user("run mixed tools").expect("user msg")],
+                ContextVariables::new(),
+                None,
+                false,
+                false,
+                5,
+            )
+            .await
+            .expect_err("mixed parallel run should bubble the tool error");
+
+        assert!(error.to_string().contains("boom"));
+
+        let tool_results: Vec<_> = collector
+            .collected()
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolResult {
+                    tool_name, success, ..
+                } => Some((tool_name, success)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tool_results,
+            vec![("tool_a".to_string(), true), ("explode".to_string(), false)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_serial_mixed_tool_results_do_not_mark_unattempted_calls_as_failed() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cmpl-mixed-serial",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-4",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"id": "s1", "type": "function",
+                             "function": {"name": "tool_a", "arguments": "{}"}},
+                            {"id": "s2", "type": "function",
+                             "function": {"name": "explode", "arguments": "{}"}},
+                            {"id": "s3", "type": "function",
+                             "function": {"name": "tool_b", "arguments": "{}"}}
+                        ]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let collector = CollectingSubscriber::new();
+        let agent = serial_agent_with_failure("serial-mixed");
+        let swarm = Swarm::builder()
+            .with_api_key("sk-test".to_string())
+            .with_api_url(mock_server.uri())
+            .with_agent(agent.clone())
+            .with_subscriber(collector.clone())
+            .build()
+            .expect("swarm build");
+
+        let error = swarm
+            .run(
+                agent,
+                vec![Message::user("run mixed tools serially").expect("user msg")],
+                ContextVariables::new(),
+                None,
+                false,
+                false,
+                5,
+            )
+            .await
+            .expect_err("mixed serial run should bubble the tool error");
+
+        assert!(error.to_string().contains("boom"));
+
+        let tool_results: Vec<_> = collector
+            .collected()
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolResult {
+                    tool_name, success, ..
+                } => Some((tool_name, success)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tool_results,
+            vec![("tool_a".to_string(), true), ("explode".to_string(), false)]
         );
     }
 }

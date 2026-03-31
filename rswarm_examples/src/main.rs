@@ -5,7 +5,7 @@ mod browse_docs;
 use anyhow::{Context, Result};
 use dotenvy::dotenv;
 use rswarm::types::AgentFunction;
-use rswarm::{Agent, Instructions, Swarm, ToolCallExecution};
+use rswarm::{Agent, Instructions, Message, Swarm, ToolCallExecution};
 use std::future::Future;
 use std::pin::Pin;
 use std::{collections::HashMap, env, fs, sync::Arc};
@@ -56,7 +56,10 @@ async fn main() -> Result<()> {
         .context("Failed to build Swarm")?;
 
     // Set up runtime parameters
-    let messages = Vec::new();
+    let messages = vec![
+        Message::user("Hello! Please help me browse Rust documentation.")
+            .expect("failed to create initial message"),
+    ];
     let context_variables = HashMap::new();
     let max_turns = 10;
 
