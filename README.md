@@ -2,6 +2,29 @@
 
 `rswarm` is a Rust library for agent-style LLM workflows: multi-turn conversations, function and tool calling, streaming responses, XML-defined execution steps, persistence, guardrails, and event hooks.
 
+## Is rswarm Right for Your Project?
+
+`rswarm` is aimed at **Rust teams building production backend services** that need LLM-driven logic as a first-class component — not as an afterthought bolted on at the edge.
+
+**It's a strong fit if:**
+
+- You're building in Rust and want LLM workflows to benefit from the same type safety, memory safety, and performance guarantees as the rest of your stack.
+- Your use case involves **agentic control flow**: routing between specialized agents based on capability, iterating on a task across multiple turns, or executing different tools based on model output.
+- You need **production hardening** out of the box: persistent session history, event auditing, circuit breakers for provider or tool failures, escalation policies, content guardrails, and OpenTelemetry tracing.
+- Your workflow involves **parallel or serial tool execution** where the model selects from a registered set of Rust functions and you want schema-validated arguments, not stringly-typed JSON parsing scattered through your codebase.
+- You want to swap between **SQLite (embedded) and PostgreSQL (remote)** persistence without touching application logic.
+
+**It's probably not the right fit if:**
+
+- Your primary stack is Python, TypeScript, or another language — the library is Rust-only.
+- You need a simple one-shot LLM call without multi-turn state or tooling; a direct API client is less overhead at that scale.
+- You need a persistent vector search backend today — the `sqlite-vec` and `qdrant` adapters are reserved but not yet implemented; in-memory semantic search is the current ceiling.
+- Your API provider doesn't expose an OpenAI-compatible chat completions endpoint.
+
+**The mental model:** rswarm sits between "call the OpenAI API yourself" and "use a full LLM application framework." It handles the protocol complexity, retry logic, schema validation, and persistence that appear in every production deployment, while keeping the surface area narrow enough to compose cleanly with the rest of a Rust service. It is not a RAG pipeline, a prompt management system, or a model-evaluation harness — it covers the runtime orchestration layer only.
+
+---
+
 The current workspace passes:
 
 - `cargo fmt --all --check`
