@@ -442,7 +442,4 @@ cargo audit
 
 ## License
 
-Licensed under either:
-
-- MIT
-- Apache-2.0
+Licensed under the [MIT License](LICENSE).
