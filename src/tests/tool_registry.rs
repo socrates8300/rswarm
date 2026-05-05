@@ -169,6 +169,7 @@ mod tests {
     // 2. Registry takes precedence over agent.functions for same-name tools
     // -----------------------------------------------------------------------
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_registry_shadows_same_name_agent_function() {
         use crate::types::{AgentFunction, AgentFunctionHandler, ContextVariables, ResultType};
 

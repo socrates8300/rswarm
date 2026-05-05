@@ -1,3 +1,8 @@
+// Some integration tests construct an `AgentFunction` to feed into the
+// `ClosureTool` migration helper, which is the documented bridge to the
+// new `Tool` trait — silence the deprecation warning module-wide.
+#![allow(deprecated)]
+
 use std::sync::{Arc, Mutex};
 
 use crate::core::Swarm;

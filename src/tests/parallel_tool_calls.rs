@@ -1,5 +1,10 @@
 #[cfg(test)]
 mod tests {
+    // Tests here cover serial/parallel tool dispatch on the AgentFunction
+    // path, which is now deprecated in favor of `Tool` + `ToolRegistry`
+    // (see `tests/tool_registry.rs`). Keep the legacy coverage during the
+    // transition.
+    #![allow(deprecated)]
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;

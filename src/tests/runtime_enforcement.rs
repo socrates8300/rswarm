@@ -1,5 +1,8 @@
 #[cfg(test)]
 mod tests {
+    // Runtime-limit tests still use the AgentFunction registration path so
+    // the legacy dispatch surface stays exercised during the transition.
+    #![allow(deprecated)]
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
