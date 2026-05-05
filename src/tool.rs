@@ -7,6 +7,21 @@ use std::sync::Arc;
 
 use crate::types::{AgentFunction, ContextVariables, ResultType};
 
+/// Reserved key in a tool result `Value` indicating the tool wants the run
+/// to hand off to a different agent. Payload is the target agent's name as a
+/// string. The named agent must already be registered with the [`crate::Swarm`]
+/// (typically via `SwarmBuilder::with_agent`).
+pub const MARKER_AGENT_HANDOFF: &str = "__rswarm_agent_handoff";
+
+/// Reserved key in a tool result `Value` indicating the tool is updating
+/// run-level context variables. Payload is a JSON object whose keys/values
+/// are merged into the run's context.
+pub const MARKER_CONTEXT_UPDATE: &str = "__rswarm_context_update";
+
+/// Reserved key in a tool result `Value` indicating the tool is terminating
+/// the run. Payload is a serialized [`crate::TerminationReason`].
+pub const MARKER_TERMINATION: &str = "__rswarm_termination";
+
 #[async_trait]
 pub trait Tool: Send + Sync + 'static {
     fn name(&self) -> &str;
@@ -385,12 +400,27 @@ impl Tool for ClosureTool {
 
         Ok(match result {
             ResultType::Value(s) => Value::String(s),
-            ResultType::Agent(agent) => serde_json::json!({ "agent_handoff": agent.name() }),
+            ResultType::Agent(agent) => {
+                let mut map = Map::new();
+                map.insert(
+                    MARKER_AGENT_HANDOFF.to_string(),
+                    Value::String(agent.name().to_string()),
+                );
+                Value::Object(map)
+            }
             ResultType::ContextVariables(ctx_vars) => {
-                serde_json::to_value(ctx_vars).unwrap_or(Value::Null)
+                let payload = serde_json::to_value(ctx_vars).unwrap_or(Value::Null);
+                let mut map = Map::new();
+                map.insert(MARKER_CONTEXT_UPDATE.to_string(), payload);
+                Value::Object(map)
             }
             ResultType::Termination(reason) => {
-                serde_json::json!({ "termination": reason.to_string() })
+                let payload = serde_json::to_value(&reason).unwrap_or_else(|_| {
+                    Value::String(reason.to_string())
+                });
+                let mut map = Map::new();
+                map.insert(MARKER_TERMINATION.to_string(), payload);
+                Value::Object(map)
             }
         })
     }

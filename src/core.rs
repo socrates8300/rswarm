@@ -30,13 +30,15 @@ use crate::observability::{
 use crate::persistence::{
     CheckpointStore, EventStore, MemoryStore, PersistenceBackend, SessionStore,
 };
-use crate::phase::TokenUsage;
+use crate::phase::{TerminationReason, TokenUsage};
 use crate::provider::{CompletionRequest, LlmProvider, OpenAiProvider};
 use crate::team::{
     AgentTeam, ConsensusStrategy, TeamAssignment, TeamDecision, TeamFormationPolicy, TeamRole,
     TeamVote, VoteTally,
 };
-use crate::tool::InvocationArgs;
+use crate::tool::{
+    InvocationArgs, ToolRegistry, MARKER_AGENT_HANDOFF, MARKER_CONTEXT_UPDATE, MARKER_TERMINATION,
+};
 use crate::types::{
     Agent, AgentFunction, AgentRef, ApiKey, ApiUrl, ChatCompletionResponse, Choice,
     ContextVariables, FinishReason, FunctionCall, FunctionCallPolicy, Instructions, Message,
@@ -218,6 +220,10 @@ pub struct Swarm {
     tool_breaker_settings: CircuitBreakerSettings,
     tool_breakers: Arc<Mutex<HashMap<String, CircuitBreaker>>>,
     team_assignment_load: Arc<Mutex<HashMap<AgentRef, u64>>>,
+    /// Optional registry of [`crate::Tool`] implementations dispatched as a
+    /// first-priority lookup before the legacy `agent.functions()` list.
+    /// `None` means tool dispatch falls through entirely to `AgentFunction`s.
+    tool_registry: Option<Arc<ToolRegistry>>,
 }
 
 /// Builder pattern implementation for creating Swarm instances.
@@ -240,6 +246,7 @@ pub struct SwarmBuilder {
     escalation_config: EscalationConfig,
     provider_breaker_settings: CircuitBreakerSettings,
     tool_breaker_settings: CircuitBreakerSettings,
+    tool_registry: Option<ToolRegistry>,
 }
 
 impl SwarmBuilder {
@@ -264,7 +271,16 @@ impl SwarmBuilder {
             escalation_config: EscalationConfig::default(),
             provider_breaker_settings: CircuitBreakerSettings::default(),
             tool_breaker_settings: CircuitBreakerSettings::default(),
+            tool_registry: None,
         }
+    }
+
+    /// Register a [`ToolRegistry`] whose tools are dispatched ahead of any
+    /// agent-scoped `AgentFunction`s and merged into the OpenAI tools wire
+    /// payload sent to the LLM.
+    pub fn with_tool_registry(mut self, registry: ToolRegistry) -> Self {
+        self.tool_registry = Some(registry);
+        self
     }
 
     pub fn with_subscriber(mut self, sub: Arc<dyn EventSubscriber>) -> Self {
@@ -530,6 +546,7 @@ impl SwarmBuilder {
             tool_breaker_settings: self.tool_breaker_settings,
             tool_breakers: Arc::new(Mutex::new(HashMap::new())),
             team_assignment_load: Arc::new(Mutex::new(HashMap::new())),
+            tool_registry: self.tool_registry.map(Arc::new),
         })
     }
 
@@ -600,6 +617,13 @@ impl Swarm {
 
     pub fn provider(&self) -> &Arc<dyn LlmProvider> {
         &self.provider
+    }
+
+    /// Read-only access to the optional [`ToolRegistry`] this `Swarm` was
+    /// built with. Returns `None` when only legacy `AgentFunction` dispatch is
+    /// configured.
+    pub fn tool_registry(&self) -> Option<&Arc<ToolRegistry>> {
+        self.tool_registry.as_ref()
     }
 
     pub fn find_agents_by_capability(&self, capability: &str) -> Vec<AgentRef> {
@@ -1381,19 +1405,20 @@ impl Swarm {
 
         if stream {
             // Streaming path: keep legacy HTTP implementation with functions support.
-            let functions: Vec<Value> = agent
+            let agent_tools: Vec<Value> = agent
                 .functions
                 .iter()
                 .map(function_to_json)
                 .collect::<SwarmResult<Vec<Value>>>()?;
+            let tools = self.merge_advertised_tools(agent_tools);
 
             let mut request_body = json!({
                 "model": model,
                 "messages": messages,
             });
 
-            if !functions.is_empty() {
-                request_body["tools"] = Value::Array(functions);
+            if !tools.is_empty() {
+                request_body["tools"] = Value::Array(tools);
             }
 
             match agent.function_call() {
@@ -1552,11 +1577,12 @@ impl Swarm {
             Ok(full_response)
         } else {
             // Non-streaming path: delegate to provider via OpenAI tools format.
-            let tools: Vec<Value> = agent
+            let agent_tools: Vec<Value> = agent
                 .functions
                 .iter()
                 .map(function_to_json)
                 .collect::<SwarmResult<Vec<Value>>>()?;
+            let tools = self.merge_advertised_tools(agent_tools);
 
             let mut request = CompletionRequest::new(model, messages);
             if !tools.is_empty() {
@@ -1596,6 +1622,118 @@ impl Swarm {
     }
 
     /// Asynchronously handles a function call from an agent.
+    /// Names of tools available to the given agent across both the
+    /// `ToolRegistry` and the agent's own `AgentFunction` list. Used by the
+    /// escalation detector to avoid flagging registry-dispatched tools as
+    /// hallucinated.
+    fn known_tool_names(&self, agent: &Agent) -> Vec<String> {
+        let mut names: Vec<String> = agent
+            .functions()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect();
+        if let Some(registry) = self.tool_registry.as_ref() {
+            for tool in registry.list_all() {
+                let name = tool.name().to_string();
+                if !names.iter().any(|n| n == &name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
+    /// Merge the OpenAI-style tools serialized from an agent's
+    /// `AgentFunction`s with any tools registered on the `Swarm`'s
+    /// `ToolRegistry`. The registry's entries take precedence on name
+    /// collisions, so a `Tool` with the same name as an `AgentFunction`
+    /// shadows the agent's version (matching the dispatch precedence in
+    /// `handle_function_call`).
+    fn merge_advertised_tools(&self, mut agent_tools: Vec<Value>) -> Vec<Value> {
+        let Some(registry) = self.tool_registry.as_ref() else {
+            return agent_tools;
+        };
+        let registry_tools = registry.to_openai_functions();
+        if registry_tools.is_empty() {
+            return agent_tools;
+        }
+        let registry_names: HashSet<String> = registry_tools
+            .iter()
+            .filter_map(|t| {
+                t.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        agent_tools.retain(|t| {
+            t.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .map(|name| !registry_names.contains(name))
+                .unwrap_or(true)
+        });
+        agent_tools.extend(registry_tools);
+        agent_tools
+    }
+
+    /// Convert the `Value` returned by a [`crate::Tool`] into a [`ResultType`]
+    /// understood by the dispatch loop. Single-key marker objects encode
+    /// non-`Value` variants (agent handoff, context variable update,
+    /// termination); anything else becomes a `ResultType::Value` with the
+    /// payload stringified.
+    fn value_to_result_type(&self, value: Value) -> SwarmResult<ResultType> {
+        if let Value::Object(map) = &value {
+            if map.len() == 1 {
+                if let Some(handoff) = map.get(MARKER_AGENT_HANDOFF) {
+                    let name = handoff.as_str().ok_or_else(|| {
+                        SwarmError::ValidationError(format!(
+                            "{} marker payload must be the target agent's name as a string",
+                            MARKER_AGENT_HANDOFF
+                        ))
+                    })?;
+                    let agent = self.agent_registry.get(name).cloned().ok_or_else(|| {
+                        SwarmError::ValidationError(format!(
+                            "Tool requested handoff to unknown agent '{}'",
+                            name
+                        ))
+                    })?;
+                    return Ok(ResultType::Agent(agent));
+                }
+                if let Some(ctx_value) = map.get(MARKER_CONTEXT_UPDATE) {
+                    let ctx: ContextVariables = serde_json::from_value(ctx_value.clone())
+                        .map_err(|e| {
+                            SwarmError::ValidationError(format!(
+                                "Invalid context variables in {} payload: {}",
+                                MARKER_CONTEXT_UPDATE, e
+                            ))
+                        })?;
+                    return Ok(ResultType::ContextVariables(ctx));
+                }
+                if let Some(reason_value) = map.get(MARKER_TERMINATION) {
+                    let reason: TerminationReason = serde_json::from_value(reason_value.clone())
+                        .map_err(|e| {
+                            SwarmError::ValidationError(format!(
+                                "Invalid TerminationReason in {} payload: {}",
+                                MARKER_TERMINATION, e
+                            ))
+                        })?;
+                    return Ok(ResultType::Termination(reason));
+                }
+            }
+        }
+        let stringified = match value {
+            Value::String(s) => s,
+            other => serde_json::to_string(&other).map_err(|e| {
+                SwarmError::DeserializationError(format!(
+                    "Failed to serialize tool result: {}",
+                    e
+                ))
+            })?,
+        };
+        Ok(ResultType::Value(stringified))
+    }
+
     pub async fn handle_function_call(
         &self,
         function_call: &FunctionCall,
@@ -1609,11 +1747,6 @@ impl Swarm {
             ));
         }
 
-        let mut function_map = HashMap::new();
-        for func in functions {
-            function_map.insert(func.name().to_string(), func.clone());
-        }
-
         let mut response = Response {
             messages: Vec::new(),
             agent: None,
@@ -1621,6 +1754,51 @@ impl Swarm {
             termination_reason: None,
             tokens_used: 0,
         };
+
+        if let Some(tool) = self
+            .tool_registry
+            .as_ref()
+            .and_then(|reg| reg.get(function_call.name()))
+        {
+            let invocation_args = InvocationArgs::from_json_str(function_call.arguments())
+                .map_err(|error| SwarmError::ValidationError(error.to_string()))?;
+            invocation_args
+                .validate_against_schema(&tool.parameters_schema())
+                .map_err(|error| SwarmError::ValidationError(error.to_string()))?;
+            debug_print(
+                debug,
+                &format!(
+                    "Processing tool call (registry): {} with arguments {}",
+                    function_call.name(),
+                    invocation_args.as_value()
+                ),
+            );
+            let raw_value = tool
+                .execute(invocation_args)
+                .await
+                .map_err(|e| SwarmError::AgentError(e.to_string()))?;
+            let result = self.value_to_result_type(raw_value)?;
+            match result {
+                ResultType::Value(value) => response
+                    .messages
+                    .push(Message::function(function_call.name(), value)?),
+                ResultType::Agent(agent) => {
+                    response.agent = Some(agent);
+                }
+                ResultType::ContextVariables(context) => {
+                    response.context_variables.extend(context);
+                }
+                ResultType::Termination(reason) => {
+                    response.termination_reason = Some(reason);
+                }
+            }
+            return Ok(response);
+        }
+
+        let mut function_map = HashMap::new();
+        for func in functions {
+            function_map.insert(func.name().to_string(), func.clone());
+        }
 
         if let Some(func) = function_map.get(function_call.name()) {
             let invocation_args = InvocationArgs::from_json_str(function_call.arguments())
@@ -2013,12 +2191,9 @@ impl Swarm {
 
         let mut termination_reason = None;
         if let Some(function_call) = message.function_call() {
-            let known_tools = state
-                .agent
-                .functions()
-                .iter()
-                .map(|function| function.name())
-                .collect::<Vec<_>>();
+            let known_tools_owned = self.known_tool_names(&state.agent);
+            let known_tools: Vec<&str> =
+                known_tools_owned.iter().map(String::as_str).collect();
             let breaker = self.get_tool_breaker(function_call.name())?;
 
             let tool_before = breaker.state_snapshot();
@@ -2207,8 +2382,11 @@ impl Swarm {
                 let functions_snapshot = state.agent.functions().to_vec();
                 let ctx_snapshot = state.context_variables.clone();
                 let execution_mode = state.agent.tool_call_execution();
-                // known_tools borrows from functions_snapshot (local), not state.agent.
-                let known_tools: Vec<&str> = functions_snapshot.iter().map(|f| f.name()).collect();
+                // Union of agent.functions() and registry tool names so that
+                // registry-dispatched tools aren't flagged as hallucinated.
+                let known_tools_owned = self.known_tool_names(&state.agent);
+                let known_tools: Vec<&str> =
+                    known_tools_owned.iter().map(String::as_str).collect();
 
                 // Pre-execution: circuit breaker check per call
                 for tc in tool_calls {
