@@ -2,6 +2,7 @@ target
 .env
 output.txt
 .claude/settings.local.json
+.claude/*.lock
 POSTGRES_ANALYSIS.md
 cargo
 cargo_err_output
