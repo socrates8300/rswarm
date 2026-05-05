@@ -6,8 +6,7 @@ pub use rswarm::types::{Agent, Instructions, Response};
 
 #[cfg(test)]
 mod tests {
-    use rswarm::{Agent, Instructions, Message, Swarm};
-    use std::collections::HashMap;
+    use rswarm::{Agent, Instructions, Message, RunOptions, Swarm};
     use std::path::Path;
 
     /// Ensure Swarm::run rejects an empty message history — guards against
@@ -23,7 +22,7 @@ mod tests {
             .expect("swarm");
 
         let result = swarm
-            .run(agent, vec![], HashMap::new(), None, false, false, 1)
+            .run(agent, vec![], RunOptions::new().with_max_turns(1))
             .await;
 
         assert!(

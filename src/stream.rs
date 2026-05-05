@@ -12,12 +12,19 @@ use crate::types::{
 use crate::util::{debug_print, function_to_json};
 
 /// Streamer provides a streaming–based API to receive agent responses incrementally.
+///
+/// **Deprecated:** Use [`Swarm::run`] with `stream: true` in [`RunOptions`](crate::RunOptions) instead.
+#[deprecated(
+    since = "0.1.9",
+    note = "use `Swarm::run` with `stream: true` in `RunOptions` instead"
+)]
 pub struct Streamer {
     client: Client,
     api_key: ApiKey,
     api_url: String,
 }
 
+#[allow(deprecated)]
 impl Streamer {
     /// Create a new Streamer instance using the provided HTTP Client, API key, and API URL.
     pub fn new(client: Client, api_key: ApiKey, api_url: String) -> Self {

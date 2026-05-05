@@ -7,6 +7,7 @@ use crate::tool::{ClosureTool, InvocationArgs, Tool};
 use crate::types::{
     AgentFunction, AgentFunctionHandler, ContextVariables, Instructions, Message, ResultType,
 };
+use crate::RunOptions;
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -121,11 +122,10 @@ mod tests {
             .run(
                 agent,
                 messages,
-                ContextVariables::new(),
-                None,
-                false,
-                false,
-                5,
+                RunOptions {
+                    max_turns: 5,
+                    ..RunOptions::default()
+                },
             )
             .await
             .expect("run failed");

@@ -30,13 +30,15 @@ use crate::observability::{
 use crate::persistence::{
     CheckpointStore, EventStore, MemoryStore, PersistenceBackend, SessionStore,
 };
-use crate::phase::TokenUsage;
+use crate::phase::{TerminationReason, TokenUsage};
 use crate::provider::{CompletionRequest, LlmProvider, OpenAiProvider};
 use crate::team::{
     AgentTeam, ConsensusStrategy, TeamAssignment, TeamDecision, TeamFormationPolicy, TeamRole,
     TeamVote, VoteTally,
 };
-use crate::tool::InvocationArgs;
+use crate::tool::{
+    InvocationArgs, ToolRegistry, MARKER_AGENT_HANDOFF, MARKER_CONTEXT_UPDATE, MARKER_TERMINATION,
+};
 use crate::types::{
     Agent, AgentFunction, AgentRef, ApiKey, ApiUrl, ChatCompletionResponse, Choice,
     ContextVariables, FinishReason, FunctionCall, FunctionCallPolicy, Instructions, Message,
@@ -83,12 +85,81 @@ impl Default for CircuitBreakerSettings {
     }
 }
 
-#[derive(Clone)]
-struct RunOptions {
-    model_override: Option<String>,
-    stream: bool,
-    debug: bool,
-    max_turns: usize,
+/// Configuration for a single [`Swarm::run`] execution.
+///
+/// Use `Default::default()` for sensible defaults, then override individual
+/// fields as needed. The struct is `#[non_exhaustive]` so new fields can be
+/// added in future minor releases without breaking callers.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use rswarm::RunOptions;
+///
+/// let options = RunOptions::new().with_max_turns(3);
+/// ```
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct RunOptions {
+    /// Context variables threaded through tool execution.
+    pub context_variables: ContextVariables,
+    /// Optional model override for this run. `None` uses the agent's default.
+    pub model_override: Option<String>,
+    /// Whether to stream the LLM response incrementally.
+    pub stream: bool,
+    /// Whether to print debug output during execution.
+    pub debug: bool,
+    /// Maximum number of conversation turns before the loop stops.
+    pub max_turns: usize,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            context_variables: ContextVariables::new(),
+            model_override: None,
+            stream: false,
+            debug: false,
+            max_turns: crate::constants::DEFAULT_MAX_LOOP_ITERATIONS as usize,
+        }
+    }
+}
+
+impl RunOptions {
+    /// Create a new `RunOptions` with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the context variables for this run.
+    pub fn with_context_variables(mut self, ctx: ContextVariables) -> Self {
+        self.context_variables = ctx;
+        self
+    }
+
+    /// Set the model override for this run.
+    pub fn with_model_override(mut self, model: Option<String>) -> Self {
+        self.model_override = model;
+        self
+    }
+
+    /// Set whether to stream the LLM response.
+    pub fn with_stream(mut self, stream: bool) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    /// Set whether to enable debug output.
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
+    }
+
+    /// Set the maximum number of conversation turns.
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = max_turns;
+        self
+    }
 }
 
 struct RunState {
@@ -149,6 +220,10 @@ pub struct Swarm {
     tool_breaker_settings: CircuitBreakerSettings,
     tool_breakers: Arc<Mutex<HashMap<String, CircuitBreaker>>>,
     team_assignment_load: Arc<Mutex<HashMap<AgentRef, u64>>>,
+    /// Optional registry of [`crate::Tool`] implementations dispatched as a
+    /// first-priority lookup before the legacy `agent.functions()` list.
+    /// `None` means tool dispatch falls through entirely to `AgentFunction`s.
+    tool_registry: Option<Arc<ToolRegistry>>,
 }
 
 /// Builder pattern implementation for creating Swarm instances.
@@ -171,6 +246,7 @@ pub struct SwarmBuilder {
     escalation_config: EscalationConfig,
     provider_breaker_settings: CircuitBreakerSettings,
     tool_breaker_settings: CircuitBreakerSettings,
+    tool_registry: Option<ToolRegistry>,
 }
 
 impl SwarmBuilder {
@@ -195,7 +271,16 @@ impl SwarmBuilder {
             escalation_config: EscalationConfig::default(),
             provider_breaker_settings: CircuitBreakerSettings::default(),
             tool_breaker_settings: CircuitBreakerSettings::default(),
+            tool_registry: None,
         }
+    }
+
+    /// Register a [`ToolRegistry`] whose tools are dispatched ahead of any
+    /// agent-scoped `AgentFunction`s and merged into the OpenAI tools wire
+    /// payload sent to the LLM.
+    pub fn with_tool_registry(mut self, registry: ToolRegistry) -> Self {
+        self.tool_registry = Some(registry);
+        self
     }
 
     pub fn with_subscriber(mut self, sub: Arc<dyn EventSubscriber>) -> Self {
@@ -461,6 +546,7 @@ impl SwarmBuilder {
             tool_breaker_settings: self.tool_breaker_settings,
             tool_breakers: Arc::new(Mutex::new(HashMap::new())),
             team_assignment_load: Arc::new(Mutex::new(HashMap::new())),
+            tool_registry: self.tool_registry.map(Arc::new),
         })
     }
 
@@ -531,6 +617,13 @@ impl Swarm {
 
     pub fn provider(&self) -> &Arc<dyn LlmProvider> {
         &self.provider
+    }
+
+    /// Read-only access to the optional [`ToolRegistry`] this `Swarm` was
+    /// built with. Returns `None` when only legacy `AgentFunction` dispatch is
+    /// configured.
+    pub fn tool_registry(&self) -> Option<&Arc<ToolRegistry>> {
+        self.tool_registry.as_ref()
     }
 
     pub fn find_agents_by_capability(&self, capability: &str) -> Vec<AgentRef> {
@@ -1312,23 +1405,31 @@ impl Swarm {
 
         if stream {
             // Streaming path: keep legacy HTTP implementation with functions support.
-            let functions: Vec<Value> = agent
+            let agent_tools: Vec<Value> = agent
                 .functions
                 .iter()
                 .map(function_to_json)
                 .collect::<SwarmResult<Vec<Value>>>()?;
+            let tools = self.merge_advertised_tools(agent_tools);
 
             let mut request_body = json!({
                 "model": model,
                 "messages": messages,
             });
 
-            if !functions.is_empty() {
-                request_body["functions"] = Value::Array(functions);
+            if !tools.is_empty() {
+                request_body["tools"] = Value::Array(tools);
             }
 
-            if let Some(function_call) = agent.function_call().to_wire_value() {
-                request_body["function_call"] = json!(function_call);
+            match agent.function_call() {
+                FunctionCallPolicy::Auto => {
+                    request_body["tool_choice"] = json!("auto");
+                }
+                FunctionCallPolicy::Named(name) => {
+                    request_body["tool_choice"] =
+                        json!({"type": "function", "function": {"name": name}});
+                }
+                FunctionCallPolicy::Disabled => {}
             }
 
             request_body["stream"] = json!(true);
@@ -1476,17 +1577,27 @@ impl Swarm {
             }]);
             Ok(full_response)
         } else {
-            // Non-streaming path: delegate to provider, then map response via JSON round-trip.
-            let functions: Vec<Value> = agent
+            // Non-streaming path: delegate to provider via OpenAI tools format.
+            let agent_tools: Vec<Value> = agent
                 .functions
                 .iter()
                 .map(function_to_json)
                 .collect::<SwarmResult<Vec<Value>>>()?;
-            let function_call_policy = agent.function_call().to_wire_value().map(|v| json!(v));
+            let tools = self.merge_advertised_tools(agent_tools);
 
             let mut request = CompletionRequest::new(model, messages);
-            if !functions.is_empty() {
-                request = request.with_functions(functions, function_call_policy);
+            if !tools.is_empty() {
+                request = request.with_tools(tools);
+            }
+            match agent.function_call() {
+                FunctionCallPolicy::Auto => {
+                    request = request.with_tool_choice(json!("auto"));
+                }
+                FunctionCallPolicy::Named(name) => {
+                    request = request
+                        .with_tool_choice(json!({"type": "function", "function": {"name": name}}));
+                }
+                FunctionCallPolicy::Disabled => {}
             }
             if agent.tool_call_execution().is_parallel() {
                 request = request.with_parallel_tool_calls(true);
@@ -1498,45 +1609,12 @@ impl Swarm {
                 &format!("Provider Response: {:?}", provider_response),
             );
 
-            let mut json_val = serde_json::to_value(&provider_response).map_err(|e| {
+            let json_val = serde_json::to_value(&provider_response).map_err(|e| {
                 SwarmError::DeserializationError(format!(
                     "Failed to serialize provider response: {}",
                     e
                 ))
             })?;
-
-            // Map tool_calls → function_call when there is exactly one tool call (backward-compat).
-            // For multiple tool calls, leave the array intact so MessageDto deserializes it into
-            // Message::tool_calls, which is dispatched by the parallel/serial execution branch.
-            if let Some(choices) = json_val["choices"].as_array_mut() {
-                for choice in choices.iter_mut() {
-                    let tc_count = choice["message"]["tool_calls"]
-                        .as_array()
-                        .map(|a| a.len())
-                        .unwrap_or(0);
-                    if tc_count == 1 {
-                        // Single-call: promote to function_call and remove the array (legacy path).
-                        let first = choice["message"]["tool_calls"][0].clone();
-                        let name = first["function"]["name"].clone();
-                        let args = first["function"]["arguments"].clone();
-                        let args_str = if args.is_string() {
-                            args.clone()
-                        } else {
-                            Value::String(
-                                serde_json::to_string(&args)
-                                    .map_err(|e| SwarmError::DeserializationError(e.to_string()))?,
-                            )
-                        };
-                        choice["message"]["function_call"] =
-                            json!({"name": name, "arguments": args_str});
-                        choice["message"]
-                            .as_object_mut()
-                            .map(|m| m.remove("tool_calls"));
-                    }
-                    // tc_count > 1: leave tool_calls in place for the multi-call dispatch path.
-                    // tc_count == 0: no-op.
-                }
-            }
 
             serde_json::from_value(json_val)
                 .map_err(|e| SwarmError::DeserializationError(e.to_string()))
@@ -1544,6 +1622,115 @@ impl Swarm {
     }
 
     /// Asynchronously handles a function call from an agent.
+    /// Names of tools available to the given agent across both the
+    /// `ToolRegistry` and the agent's own `AgentFunction` list. Used by the
+    /// escalation detector to avoid flagging registry-dispatched tools as
+    /// hallucinated.
+    fn known_tool_names(&self, agent: &Agent) -> Vec<String> {
+        let mut names: Vec<String> = agent
+            .functions()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect();
+        if let Some(registry) = self.tool_registry.as_ref() {
+            for tool in registry.list_all() {
+                let name = tool.name().to_string();
+                if !names.iter().any(|n| n == &name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
+    /// Merge the OpenAI-style tools serialized from an agent's
+    /// `AgentFunction`s with any tools registered on the `Swarm`'s
+    /// `ToolRegistry`. The registry's entries take precedence on name
+    /// collisions, so a `Tool` with the same name as an `AgentFunction`
+    /// shadows the agent's version (matching the dispatch precedence in
+    /// `handle_function_call`).
+    fn merge_advertised_tools(&self, mut agent_tools: Vec<Value>) -> Vec<Value> {
+        let Some(registry) = self.tool_registry.as_ref() else {
+            return agent_tools;
+        };
+        let registry_tools = registry.to_openai_functions();
+        if registry_tools.is_empty() {
+            return agent_tools;
+        }
+        let registry_names: HashSet<String> = registry_tools
+            .iter()
+            .filter_map(|t| {
+                t.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        agent_tools.retain(|t| {
+            t.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .map(|name| !registry_names.contains(name))
+                .unwrap_or(true)
+        });
+        agent_tools.extend(registry_tools);
+        agent_tools
+    }
+
+    /// Convert the `Value` returned by a [`crate::Tool`] into a [`ResultType`]
+    /// understood by the dispatch loop. Single-key marker objects encode
+    /// non-`Value` variants (agent handoff, context variable update,
+    /// termination); anything else becomes a `ResultType::Value` with the
+    /// payload stringified.
+    fn value_to_result_type(&self, value: Value) -> SwarmResult<ResultType> {
+        if let Value::Object(map) = &value {
+            if map.len() == 1 {
+                if let Some(handoff) = map.get(MARKER_AGENT_HANDOFF) {
+                    let name = handoff.as_str().ok_or_else(|| {
+                        SwarmError::ValidationError(format!(
+                            "{} marker payload must be the target agent's name as a string",
+                            MARKER_AGENT_HANDOFF
+                        ))
+                    })?;
+                    let agent = self.agent_registry.get(name).cloned().ok_or_else(|| {
+                        SwarmError::ValidationError(format!(
+                            "Tool requested handoff to unknown agent '{}'",
+                            name
+                        ))
+                    })?;
+                    return Ok(ResultType::Agent(agent));
+                }
+                if let Some(ctx_value) = map.get(MARKER_CONTEXT_UPDATE) {
+                    let ctx: ContextVariables =
+                        serde_json::from_value(ctx_value.clone()).map_err(|e| {
+                            SwarmError::ValidationError(format!(
+                                "Invalid context variables in {} payload: {}",
+                                MARKER_CONTEXT_UPDATE, e
+                            ))
+                        })?;
+                    return Ok(ResultType::ContextVariables(ctx));
+                }
+                if let Some(reason_value) = map.get(MARKER_TERMINATION) {
+                    let reason: TerminationReason = serde_json::from_value(reason_value.clone())
+                        .map_err(|e| {
+                            SwarmError::ValidationError(format!(
+                                "Invalid TerminationReason in {} payload: {}",
+                                MARKER_TERMINATION, e
+                            ))
+                        })?;
+                    return Ok(ResultType::Termination(reason));
+                }
+            }
+        }
+        let stringified = match value {
+            Value::String(s) => s,
+            other => serde_json::to_string(&other).map_err(|e| {
+                SwarmError::DeserializationError(format!("Failed to serialize tool result: {}", e))
+            })?,
+        };
+        Ok(ResultType::Value(stringified))
+    }
+
     pub async fn handle_function_call(
         &self,
         function_call: &FunctionCall,
@@ -1557,11 +1744,6 @@ impl Swarm {
             ));
         }
 
-        let mut function_map = HashMap::new();
-        for func in functions {
-            function_map.insert(func.name().to_string(), func.clone());
-        }
-
         let mut response = Response {
             messages: Vec::new(),
             agent: None,
@@ -1569,6 +1751,51 @@ impl Swarm {
             termination_reason: None,
             tokens_used: 0,
         };
+
+        if let Some(tool) = self
+            .tool_registry
+            .as_ref()
+            .and_then(|reg| reg.get(function_call.name()))
+        {
+            let invocation_args = InvocationArgs::from_json_str(function_call.arguments())
+                .map_err(|error| SwarmError::ValidationError(error.to_string()))?;
+            invocation_args
+                .validate_against_schema(&tool.parameters_schema())
+                .map_err(|error| SwarmError::ValidationError(error.to_string()))?;
+            debug_print(
+                debug,
+                &format!(
+                    "Processing tool call (registry): {} with arguments {}",
+                    function_call.name(),
+                    invocation_args.as_value()
+                ),
+            );
+            let raw_value = tool
+                .execute(invocation_args)
+                .await
+                .map_err(|e| SwarmError::AgentError(e.to_string()))?;
+            let result = self.value_to_result_type(raw_value)?;
+            match result {
+                ResultType::Value(value) => response
+                    .messages
+                    .push(Message::function(function_call.name(), value)?),
+                ResultType::Agent(agent) => {
+                    response.agent = Some(agent);
+                }
+                ResultType::ContextVariables(context) => {
+                    response.context_variables.extend(context);
+                }
+                ResultType::Termination(reason) => {
+                    response.termination_reason = Some(reason);
+                }
+            }
+            return Ok(response);
+        }
+
+        let mut function_map = HashMap::new();
+        for func in functions {
+            function_map.insert(func.name().to_string(), func.clone());
+        }
 
         if let Some(func) = function_map.get(function_call.name()) {
             let invocation_args = InvocationArgs::from_json_str(function_call.arguments())
@@ -1961,12 +2188,8 @@ impl Swarm {
 
         let mut termination_reason = None;
         if let Some(function_call) = message.function_call() {
-            let known_tools = state
-                .agent
-                .functions()
-                .iter()
-                .map(|function| function.name())
-                .collect::<Vec<_>>();
+            let known_tools_owned = self.known_tool_names(&state.agent);
+            let known_tools: Vec<&str> = known_tools_owned.iter().map(String::as_str).collect();
             let breaker = self.get_tool_breaker(function_call.name())?;
 
             let tool_before = breaker.state_snapshot();
@@ -2155,8 +2378,10 @@ impl Swarm {
                 let functions_snapshot = state.agent.functions().to_vec();
                 let ctx_snapshot = state.context_variables.clone();
                 let execution_mode = state.agent.tool_call_execution();
-                // known_tools borrows from functions_snapshot (local), not state.agent.
-                let known_tools: Vec<&str> = functions_snapshot.iter().map(|f| f.name()).collect();
+                // Union of agent.functions() and registry tool names so that
+                // registry-dispatched tools aren't flagged as hallucinated.
+                let known_tools_owned = self.known_tool_names(&state.agent);
+                let known_tools: Vec<&str> = known_tools_owned.iter().map(String::as_str).collect();
 
                 // Pre-execution: circuit breaker check per call
                 for tc in tool_calls {
@@ -2460,34 +2685,30 @@ impl Swarm {
     }
 
     /// Executes a multi-turn conversation with the AI agent.
-    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
-        mut agent: Agent,
+        agent: Agent,
         messages: Vec<Message>,
-        context_variables: ContextVariables,
-        model_override: Option<String>,
-        stream: bool,
-        debug: bool,
-        max_turns: usize,
+        mut options: RunOptions,
     ) -> SwarmResult<Response> {
-        validate_api_request(&agent, &messages, &model_override, max_turns)?;
+        let mut agent = agent;
 
-        if max_turns > self.config.max_loop_iterations() as usize {
+        validate_api_request(
+            &agent,
+            &messages,
+            &options.model_override,
+            options.max_turns,
+        )?;
+
+        if options.max_turns > self.config.max_loop_iterations() as usize {
             return Err(SwarmError::ValidationError(format!(
                 "max_turns ({}) exceeds configured max_loop_iterations ({})",
-                max_turns,
+                options.max_turns,
                 self.config.max_loop_iterations()
             )));
         }
 
         let trace_id = TraceId::from(uuid::Uuid::new_v4().to_string());
-        let options = RunOptions {
-            model_override,
-            stream,
-            debug,
-            max_turns,
-        };
 
         self.create_session_if_configured(&trace_id, agent.name())
             .await;
@@ -2500,7 +2721,7 @@ impl Swarm {
 
         let instructions = match &agent.instructions {
             Instructions::Text(text) => text.clone(),
-            Instructions::Function(func) => func(context_variables.clone()),
+            Instructions::Function(func) => func(options.context_variables.clone()),
         };
         let (instructions_without_xml, xml_steps) = extract_xml_steps(&instructions)?;
         let steps = if let Some(xml_content) = xml_steps {
@@ -2518,6 +2739,7 @@ impl Swarm {
                 instructions_without_xml
             };
         agent.instructions = Instructions::Text(effective_instructions);
+        let context_variables = std::mem::take(&mut options.context_variables);
         let mut state = RunState {
             agent,
             history: messages,
@@ -2619,6 +2841,31 @@ impl Swarm {
         }
     }
 
+    /// Legacy entry point with positional parameters.
+    ///
+    /// Prefer [`run`](Self::run) with [`RunOptions`] instead.
+    #[deprecated(since = "0.1.9", note = "use `run` with `RunOptions` instead")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_legacy(
+        &self,
+        agent: Agent,
+        messages: Vec<Message>,
+        context_variables: ContextVariables,
+        model_override: Option<String>,
+        stream: bool,
+        debug: bool,
+        max_turns: usize,
+    ) -> SwarmResult<Response> {
+        let options = RunOptions {
+            context_variables,
+            model_override,
+            stream,
+            debug,
+            max_turns,
+        };
+        self.run(agent, messages, options).await
+    }
+
     /// Saves a checkpoint if a `CheckpointStore` is configured.
     ///
     /// Failures are non-fatal — they are traced at WARN level but do not abort
@@ -2711,16 +2958,14 @@ impl Swarm {
             });
         }
 
-        self.run(
-            agent,
-            envelope.payload.messages,
-            envelope.payload.context_variables,
+        let options = RunOptions {
+            context_variables: envelope.payload.context_variables,
             model_override,
             stream,
             debug,
-            remaining,
-        )
-        .await
+            max_turns: remaining,
+        };
+        self.run(agent, envelope.payload.messages, options).await
     }
 
     pub fn get_agent_by_name(&self, name: &str) -> SwarmResult<Agent> {

@@ -30,7 +30,7 @@ pub use crate::agent_comm::{
 pub use crate::agent_registry::AgentRegistry;
 pub use crate::checkpoint::{CheckpointData, CheckpointEnvelope, CURRENT_CHECKPOINT_VERSION};
 pub use crate::circuit_breaker::{CircuitBreaker, CircuitStateSnapshot};
-pub use crate::core::Swarm;
+pub use crate::core::{RunOptions, Swarm};
 pub use crate::distribution::{
     AgentAddress, DistributedMessage, DistributedTransport, HttpDistributedTransport,
 };

@@ -1132,7 +1132,7 @@ pub struct FunctionCall {
 #[derive(Deserialize)]
 struct FunctionCallDto {
     name: String,
-    arguments: String,
+    arguments: Value,
 }
 
 impl FunctionCall {
@@ -1193,7 +1193,13 @@ impl<'de> Deserialize<'de> for FunctionCall {
         D: Deserializer<'de>,
     {
         let dto = FunctionCallDto::deserialize(deserializer)?;
-        Self::new(dto.name, dto.arguments).map_err(de::Error::custom)
+        // Accept both string and non-string arguments (some providers serialize
+        // arguments as an object rather than a JSON-encoded string).
+        let args_str = match dto.arguments {
+            Value::String(s) => s,
+            other => serde_json::to_string(&other).map_err(de::Error::custom)?,
+        };
+        Self::new(dto.name, args_str).map_err(de::Error::custom)
     }
 }
 

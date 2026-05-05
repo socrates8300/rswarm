@@ -10,3 +10,4 @@ pub mod runtime_enforcement;
 pub mod stream;
 pub mod swarm_run;
 pub mod tool_args;
+pub mod tool_registry;

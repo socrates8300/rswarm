@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    #[allow(deprecated)]
     use crate::stream::Streamer;
     use crate::types::{Agent, ApiKey, ContextVariables, Instructions, Message};
     #[allow(unused)]
@@ -22,6 +23,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_stream_chat_returns_messages() {
         // Start a WireMock server.
         let mock_server = MockServer::start().await;
