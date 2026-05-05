@@ -272,7 +272,7 @@ Ok(json!({ "__rswarm_agent_handoff": "specialist_agent" }))
 ### Migrating from `AgentFunction`
 
 `AgentFunction::new(...)` and `Agent::with_functions(...)` are
-`#[deprecated]` since 0.2.0 and routed through the same dispatch path
+`#[deprecated]` since 0.1.9 and routed through the same dispatch path
 as the `Tool` trait, so existing code continues to work. To migrate
 without rewriting the closure body, wrap the `AgentFunction` with
 `ClosureTool::from_agent_function(...)`:
