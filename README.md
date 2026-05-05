@@ -281,10 +281,10 @@ without rewriting the closure body, wrap the `AgentFunction` with
 # use rswarm::{ClosureTool, ToolRegistry};
 # fn build(my_agent_fn: rswarm::AgentFunction) {
 let mut registry = ToolRegistry::new();
-registry.register(
-    ClosureTool::from_agent_function(my_agent_fn)
-        .with_description("..."),
-);
+// The wrapped `AgentFunction`'s description is carried through by
+// default; call `.with_description(...)` to override or to supply one
+// when the source `AgentFunction` did not set one.
+registry.register(ClosureTool::from_agent_function(my_agent_fn));
 // ... swarm.builder().with_tool_registry(registry) ...
 # }
 ```

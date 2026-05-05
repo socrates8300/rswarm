@@ -362,9 +362,10 @@ pub struct ClosureTool {
 impl ClosureTool {
     pub fn from_agent_function(agent_fn: AgentFunction) -> Self {
         let name = agent_fn.name().to_string();
+        let description = agent_fn.description().to_string();
         Self {
             name,
-            description: String::new(),
+            description,
             agent_fn,
         }
     }
