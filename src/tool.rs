@@ -128,11 +128,28 @@ impl InvocationArgs {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct ToolSchema {
     pub name: String,
     pub description: String,
     pub parameters: Value,
+}
+
+impl serde::Serialize for ToolSchema {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("type", "function")?;
+        map.serialize_entry(
+            "function",
+            &serde_json::json!({
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            }),
+        )?;
+        map.end()
+    }
 }
 
 impl ToolSchema {
@@ -299,9 +316,12 @@ impl ToolRegistry {
             .values()
             .map(|tool| {
                 serde_json::json!({
-                    "name": tool.name(),
-                    "description": tool.description(),
-                    "parameters": tool.parameters_schema()
+                    "type": "function",
+                    "function": {
+                        "name": tool.name(),
+                        "description": tool.description(),
+                        "parameters": tool.parameters_schema()
+                    }
                 })
             })
             .collect()

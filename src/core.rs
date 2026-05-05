@@ -1393,11 +1393,17 @@ impl Swarm {
             });
 
             if !functions.is_empty() {
-                request_body["functions"] = Value::Array(functions);
+                request_body["tools"] = Value::Array(functions);
             }
 
-            if let Some(function_call) = agent.function_call().to_wire_value() {
-                request_body["function_call"] = json!(function_call);
+            match agent.function_call() {
+                FunctionCallPolicy::Auto => {
+                    request_body["tool_choice"] = json!("auto");
+                }
+                FunctionCallPolicy::Named(name) => {
+                    request_body["tool_choice"] = json!({"type": "function", "function": {"name": name}});
+                }
+                FunctionCallPolicy::Disabled => {}
             }
 
             request_body["stream"] = json!(true);
@@ -1545,17 +1551,27 @@ impl Swarm {
             }]);
             Ok(full_response)
         } else {
-            // Non-streaming path: delegate to provider, then map response via JSON round-trip.
-            let functions: Vec<Value> = agent
+            // Non-streaming path: delegate to provider via OpenAI tools format.
+            let tools: Vec<Value> = agent
                 .functions
                 .iter()
                 .map(function_to_json)
                 .collect::<SwarmResult<Vec<Value>>>()?;
-            let function_call_policy = agent.function_call().to_wire_value().map(|v| json!(v));
 
             let mut request = CompletionRequest::new(model, messages);
-            if !functions.is_empty() {
-                request = request.with_functions(functions, function_call_policy);
+            if !tools.is_empty() {
+                request = request.with_tools(tools);
+            }
+            match agent.function_call() {
+                FunctionCallPolicy::Auto => {
+                    request = request.with_tool_choice(json!("auto"));
+                }
+                FunctionCallPolicy::Named(name) => {
+                    request = request.with_tool_choice(
+                        json!({"type": "function", "function": {"name": name}}),
+                    );
+                }
+                FunctionCallPolicy::Disabled => {}
             }
             if agent.tool_call_execution().is_parallel() {
                 request = request.with_parallel_tool_calls(true);
@@ -1567,45 +1583,12 @@ impl Swarm {
                 &format!("Provider Response: {:?}", provider_response),
             );
 
-            let mut json_val = serde_json::to_value(&provider_response).map_err(|e| {
+            let json_val = serde_json::to_value(&provider_response).map_err(|e| {
                 SwarmError::DeserializationError(format!(
                     "Failed to serialize provider response: {}",
                     e
                 ))
             })?;
-
-            // Map tool_calls → function_call when there is exactly one tool call (backward-compat).
-            // For multiple tool calls, leave the array intact so MessageDto deserializes it into
-            // Message::tool_calls, which is dispatched by the parallel/serial execution branch.
-            if let Some(choices) = json_val["choices"].as_array_mut() {
-                for choice in choices.iter_mut() {
-                    let tc_count = choice["message"]["tool_calls"]
-                        .as_array()
-                        .map(|a| a.len())
-                        .unwrap_or(0);
-                    if tc_count == 1 {
-                        // Single-call: promote to function_call and remove the array (legacy path).
-                        let first = choice["message"]["tool_calls"][0].clone();
-                        let name = first["function"]["name"].clone();
-                        let args = first["function"]["arguments"].clone();
-                        let args_str = if args.is_string() {
-                            args.clone()
-                        } else {
-                            Value::String(
-                                serde_json::to_string(&args)
-                                    .map_err(|e| SwarmError::DeserializationError(e.to_string()))?,
-                            )
-                        };
-                        choice["message"]["function_call"] =
-                            json!({"name": name, "arguments": args_str});
-                        choice["message"]
-                            .as_object_mut()
-                            .map(|m| m.remove("tool_calls"));
-                    }
-                    // tc_count > 1: leave tool_calls in place for the multi-call dispatch path.
-                    // tc_count == 0: no-op.
-                }
-            }
 
             serde_json::from_value(json_val)
                 .map_err(|e| SwarmError::DeserializationError(e.to_string()))

@@ -1,5 +1,4 @@
 use crate::error::SwarmError;
-use crate::tool::ToolSchema;
 use crate::types::Message;
 use async_trait::async_trait;
 use futures::Stream;
@@ -23,12 +22,15 @@ pub struct CompletionRequest {
     pub messages: Vec<Message>,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<ToolSchema>>,
+    pub tools: Option<Vec<Value>>,
     /// Legacy OpenAI functions format (used for streaming and function_call responses).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub functions: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_call: Option<Value>,
+    /// Modern OpenAI `tool_choice` field (used with `tools` format).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
     #[serde(default)]
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,6 +51,7 @@ impl CompletionRequest {
             tools: None,
             functions: None,
             function_call: None,
+            tool_choice: None,
             stream: false,
             temperature: None,
             max_tokens: None,
@@ -62,7 +65,7 @@ impl CompletionRequest {
         self
     }
 
-    pub fn with_tools(mut self, tools: Vec<ToolSchema>) -> Self {
+    pub fn with_tools(mut self, tools: Vec<Value>) -> Self {
         self.tools = Some(tools);
         self
     }
@@ -70,6 +73,11 @@ impl CompletionRequest {
     pub fn with_functions(mut self, functions: Vec<Value>, function_call: Option<Value>) -> Self {
         self.functions = Some(functions);
         self.function_call = function_call;
+        self
+    }
+
+    pub fn with_tool_choice(mut self, choice: Value) -> Self {
+        self.tool_choice = Some(choice);
         self
     }
 

@@ -76,9 +76,12 @@ pub fn merge_chunk_message(message: &mut Message, delta: &serde_json::Map<String
 ///
 pub fn function_to_json(func: &AgentFunction) -> SwarmResult<Value> {
     Ok(json!({
-        "name": func.name(),
-        "description": func.description(),
-        "parameters": func.parameters_schema(),
+        "type": "function",
+        "function": {
+            "name": func.name(),
+            "description": func.description(),
+            "parameters": func.parameters_schema(),
+        }
     }))
 }
 
