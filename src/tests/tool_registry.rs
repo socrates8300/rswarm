@@ -338,7 +338,10 @@ mod tests {
             .expect("run should succeed");
 
         assert_eq!(
-            response.context_variables.get("user_id").map(String::as_str),
+            response
+                .context_variables
+                .get("user_id")
+                .map(String::as_str),
             Some("42")
         );
         assert_eq!(

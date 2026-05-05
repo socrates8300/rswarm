@@ -415,9 +415,8 @@ impl Tool for ClosureTool {
                 Value::Object(map)
             }
             ResultType::Termination(reason) => {
-                let payload = serde_json::to_value(&reason).unwrap_or_else(|_| {
-                    Value::String(reason.to_string())
-                });
+                let payload = serde_json::to_value(&reason)
+                    .unwrap_or_else(|_| Value::String(reason.to_string()));
                 let mut map = Map::new();
                 map.insert(MARKER_TERMINATION.to_string(), payload);
                 Value::Object(map)

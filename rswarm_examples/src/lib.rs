@@ -7,7 +7,6 @@ pub use rswarm::types::{Agent, Instructions, Response};
 #[cfg(test)]
 mod tests {
     use rswarm::{Agent, Instructions, Message, RunOptions, Swarm};
-    use std::collections::HashMap;
     use std::path::Path;
 
     /// Ensure Swarm::run rejects an empty message history — guards against
