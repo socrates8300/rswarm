@@ -10,11 +10,11 @@ mod tests {
     use crate::core::Swarm;
     use crate::error::SwarmError;
     use crate::event::{AgentEvent, EventSubscriber};
-    use crate::RunOptions;
     use crate::types::{
         Agent, AgentFunction, AgentFunctionHandler, ContextVariables, Instructions, Message,
         ResultType, ToolCallExecution,
     };
+    use crate::RunOptions;
 
     // ---------------------------------------------------------------------------
     // Test helpers
@@ -167,7 +167,10 @@ mod tests {
             .run(
                 agent,
                 vec![Message::user("run both tools").expect("user msg")],
-                RunOptions { max_turns: 5, ..RunOptions::default() },
+                RunOptions {
+                    max_turns: 5,
+                    ..RunOptions::default()
+                },
             )
             .await
             .expect("run should succeed");
@@ -242,7 +245,10 @@ mod tests {
             .run(
                 agent,
                 vec![Message::user("run both tools serially").expect("user msg")],
-                RunOptions { max_turns: 5, ..RunOptions::default() },
+                RunOptions {
+                    max_turns: 5,
+                    ..RunOptions::default()
+                },
             )
             .await
             .expect("run should succeed");
@@ -316,7 +322,10 @@ mod tests {
             .run(
                 agent,
                 vec![Message::user("run one tool").expect("user msg")],
-                RunOptions { max_turns: 5, ..RunOptions::default() },
+                RunOptions {
+                    max_turns: 5,
+                    ..RunOptions::default()
+                },
             )
             .await
             .expect("single-tool run should succeed");
@@ -406,7 +415,10 @@ mod tests {
             .run(
                 agent,
                 vec![Message::user("set context").expect("user msg")],
-                RunOptions { max_turns: 5, ..RunOptions::default() },
+                RunOptions {
+                    max_turns: 5,
+                    ..RunOptions::default()
+                },
             )
             .await
             .expect("context vars run should succeed");
@@ -466,7 +478,10 @@ mod tests {
             .run(
                 agent,
                 vec![Message::user("run mixed tools").expect("user msg")],
-                RunOptions { max_turns: 5, ..RunOptions::default() },
+                RunOptions {
+                    max_turns: 5,
+                    ..RunOptions::default()
+                },
             )
             .await
             .expect_err("mixed parallel run should bubble the tool error");
@@ -533,7 +548,10 @@ mod tests {
             .run(
                 agent,
                 vec![Message::user("run mixed tools serially").expect("user msg")],
-                RunOptions { max_turns: 5, ..RunOptions::default() },
+                RunOptions {
+                    max_turns: 5,
+                    ..RunOptions::default()
+                },
             )
             .await
             .expect_err("mixed serial run should bubble the tool error");

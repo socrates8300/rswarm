@@ -1426,7 +1426,8 @@ impl Swarm {
                     request_body["tool_choice"] = json!("auto");
                 }
                 FunctionCallPolicy::Named(name) => {
-                    request_body["tool_choice"] = json!({"type": "function", "function": {"name": name}});
+                    request_body["tool_choice"] =
+                        json!({"type": "function", "function": {"name": name}});
                 }
                 FunctionCallPolicy::Disabled => {}
             }
@@ -1593,9 +1594,8 @@ impl Swarm {
                     request = request.with_tool_choice(json!("auto"));
                 }
                 FunctionCallPolicy::Named(name) => {
-                    request = request.with_tool_choice(
-                        json!({"type": "function", "function": {"name": name}}),
-                    );
+                    request = request
+                        .with_tool_choice(json!({"type": "function", "function": {"name": name}}));
                 }
                 FunctionCallPolicy::Disabled => {}
             }
@@ -1701,8 +1701,8 @@ impl Swarm {
                     return Ok(ResultType::Agent(agent));
                 }
                 if let Some(ctx_value) = map.get(MARKER_CONTEXT_UPDATE) {
-                    let ctx: ContextVariables = serde_json::from_value(ctx_value.clone())
-                        .map_err(|e| {
+                    let ctx: ContextVariables =
+                        serde_json::from_value(ctx_value.clone()).map_err(|e| {
                             SwarmError::ValidationError(format!(
                                 "Invalid context variables in {} payload: {}",
                                 MARKER_CONTEXT_UPDATE, e
@@ -1725,10 +1725,7 @@ impl Swarm {
         let stringified = match value {
             Value::String(s) => s,
             other => serde_json::to_string(&other).map_err(|e| {
-                SwarmError::DeserializationError(format!(
-                    "Failed to serialize tool result: {}",
-                    e
-                ))
+                SwarmError::DeserializationError(format!("Failed to serialize tool result: {}", e))
             })?,
         };
         Ok(ResultType::Value(stringified))
@@ -2192,8 +2189,7 @@ impl Swarm {
         let mut termination_reason = None;
         if let Some(function_call) = message.function_call() {
             let known_tools_owned = self.known_tool_names(&state.agent);
-            let known_tools: Vec<&str> =
-                known_tools_owned.iter().map(String::as_str).collect();
+            let known_tools: Vec<&str> = known_tools_owned.iter().map(String::as_str).collect();
             let breaker = self.get_tool_breaker(function_call.name())?;
 
             let tool_before = breaker.state_snapshot();
@@ -2385,8 +2381,7 @@ impl Swarm {
                 // Union of agent.functions() and registry tool names so that
                 // registry-dispatched tools aren't flagged as hallucinated.
                 let known_tools_owned = self.known_tool_names(&state.agent);
-                let known_tools: Vec<&str> =
-                    known_tools_owned.iter().map(String::as_str).collect();
+                let known_tools: Vec<&str> = known_tools_owned.iter().map(String::as_str).collect();
 
                 // Pre-execution: circuit breaker check per call
                 for tc in tool_calls {
@@ -2698,7 +2693,12 @@ impl Swarm {
     ) -> SwarmResult<Response> {
         let mut agent = agent;
 
-        validate_api_request(&agent, &messages, &options.model_override, options.max_turns)?;
+        validate_api_request(
+            &agent,
+            &messages,
+            &options.model_override,
+            options.max_turns,
+        )?;
 
         if options.max_turns > self.config.max_loop_iterations() as usize {
             return Err(SwarmError::ValidationError(format!(
@@ -2844,10 +2844,7 @@ impl Swarm {
     /// Legacy entry point with positional parameters.
     ///
     /// Prefer [`run`](Self::run) with [`RunOptions`] instead.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use `run` with `RunOptions` instead"
-    )]
+    #[deprecated(since = "0.2.0", note = "use `run` with `RunOptions` instead")]
     #[allow(clippy::too_many_arguments)]
     pub async fn run_legacy(
         &self,
