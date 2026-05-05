@@ -26,12 +26,6 @@ otel = [
     "dep:tracing-opentelemetry",
     "dep:tracing-subscriber",
 ]
-## Enable sqlite-vec embedded vector backend.
-## The backend currently returns configuration errors until the adapter lands.
-sqlite-vec = []
-## Enable Qdrant remote vector backend.
-## The backend currently returns configuration errors until the adapter lands.
-qdrant = []
 
 [dependencies]
 anyhow = "1.0.89"

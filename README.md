@@ -18,7 +18,7 @@
 
 - Your primary stack is Python, TypeScript, or another language — the library is Rust-only.
 - You need a simple one-shot LLM call without multi-turn state or tooling; a direct API client is less overhead at that scale.
-- You need a persistent vector search backend today — the `sqlite-vec` and `qdrant` adapters are reserved but not yet implemented; in-memory semantic search is the current ceiling.
+- You need a persistent vector search backend today — in-memory semantic search is the current ceiling; persistent backends (Qdrant, sqlite-vec) are planned.
 - Your API provider doesn't expose an OpenAI-compatible chat completions endpoint.
 
 **The mental model:** rswarm sits between "call the OpenAI API yourself" and "use a full LLM application framework." It handles the protocol complexity, retry logic, schema validation, and persistence that appear in every production deployment, while keeping the surface area narrow enough to compose cleanly with the rest of a Rust service. It is not a RAG pipeline, a prompt management system, or a model-evaluation harness — it covers the runtime orchestration layer only.
@@ -71,8 +71,6 @@ Optional feature flags:
 - `postgres-tls`: PostgreSQL persistence with rustls + native roots
 - `metrics-export`: Prometheus metrics exporter
 - `otel`: OpenTelemetry tracing export
-- `sqlite-vec`: reserved feature; adapter currently returns a configuration error
-- `qdrant`: reserved feature; adapter currently returns a configuration error
 
 Example:
 
@@ -385,10 +383,8 @@ Available today:
 
 Current status of feature-gated adapters:
 
-- `sqlite-vec`: feature exists, persistent adapter currently returns a configuration error
-- `qdrant`: feature exists, adapter currently returns a configuration error
-
-Use `InMemoryVectorStore` for development and small deployments until those adapters land.
+Persistent vector backends (Qdrant, sqlite-vec) are planned but not yet available.
+`InMemoryVectorStore` is the only implementation today.
 
 ## Events, Guardrails, and Runtime Controls
 
@@ -436,7 +432,7 @@ cargo audit
 ## Current Caveats
 
 - `Swarm::run(...)` requires at least one input message
-- the vector database adapters behind `sqlite-vec` and `qdrant` are not implemented yet
+- persistent vector backends (Qdrant, sqlite-vec) are planned but not yet implemented
 - `Agent` and `Message` use constructors/builders; their internal fields are not public API
 - remote PostgreSQL connections should use TLS helpers, not `PostgresStore::connect(...)`
 

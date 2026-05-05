@@ -1,5 +1,3 @@
-pub mod qdrant;
-pub mod sqlite_vss;
 pub mod vector;
 
 use crate::error::{SwarmError, SwarmResult};
