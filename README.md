@@ -157,11 +157,14 @@ let agent = Agent::new(
 
 Relevant agent APIs:
 
-- `with_functions(...)`
 - `with_function_call_policy(...)`
 - `with_tool_call_execution(...)`
 - `with_expected_response_fields(...)`
 - `with_capabilities(...)`
+
+Tools are registered on the `Swarm`, not on the `Agent` — see
+[Function Calling](#function-calling). `Agent::with_functions(...)` is
+still available for migration but is `#[deprecated]`.
 
 Instruction modes:
 
@@ -170,69 +173,123 @@ Instruction modes:
 
 ## Function Calling
 
-`AgentFunction` is the main application-level tool/function abstraction used during `Swarm::run(...)`.
+Tools are defined as types that implement the `Tool` trait, registered on
+a `ToolRegistry`, and attached to the `Swarm` via
+`SwarmBuilder::with_tool_registry(...)`. The registry is advertised to the
+LLM as the `tools` field in the OpenAI chat-completions wire format and
+dispatched on `tool_call` responses without any per-agent wiring.
 
 ```rust
+use async_trait::async_trait;
 use rswarm::{
-    Agent, AgentFunction, ContextVariables, FunctionCallPolicy, Instructions, ResultType,
-    ToolCallExecution,
+    Agent, FunctionCallPolicy, Instructions, InvocationArgs, Message, RunOptions,
+    Swarm, Tool, ToolCallExecution, ToolError, ToolRegistry,
 };
-use serde_json::json;
-use std::sync::Arc;
+use serde_json::{json, Value};
 
-let weather = AgentFunction::new(
-    "get_weather",
-    Arc::new(|args: ContextVariables| {
-        Box::pin(async move {
-            let city = args
-                .get("city")
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            Ok(ResultType::Value(format!("Sunny in {city}")))
+struct GetWeather;
+
+#[async_trait]
+impl Tool for GetWeather {
+    fn name(&self) -> &str { "get_weather" }
+    fn description(&self) -> &str { "Return a short weather summary for a city" }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "city": { "type": "string" } },
+            "required": ["city"],
+            "additionalProperties": false,
         })
-    }),
-    true,
-)?
-.with_description("Return a short weather summary for a city")
-.with_parameters_schema(json!({
-    "type": "object",
-    "properties": {
-        "city": { "type": "string" }
-    },
-    "required": ["city"],
-    "additionalProperties": false
-}))?;
+    }
+    async fn execute(&self, args: InvocationArgs) -> Result<Value, ToolError> {
+        let city = args
+            .as_object()
+            .and_then(|m| m.get("city"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        Ok(Value::String(format!("Sunny in {city}")))
+    }
+}
 
 let agent = Agent::new(
     "weather-bot",
     "gpt-4o",
     Instructions::Text("Use tools when needed.".to_string()),
 )?
-.with_functions(vec![weather])
 .with_function_call_policy(FunctionCallPolicy::Auto)
 .with_tool_call_execution(ToolCallExecution::Parallel);
+
+let mut registry = ToolRegistry::new();
+registry.register(GetWeather);
+
+let swarm = Swarm::builder()
+    .with_api_key(std::env::var("OPENAI_API_KEY")?)
+    .with_agent(agent.clone())
+    .with_tool_registry(registry)
+    .build()?;
+
+let response = swarm
+    .run(
+        agent,
+        vec![Message::user("Weather in Paris?")?],
+        RunOptions::new().with_max_turns(5),
+    )
+    .await?;
 ```
 
-Notes:
+### Marker conventions for non-`Value` results
+
+`Tool::execute` returns `Result<Value, ToolError>`, but a tool can also
+trigger an agent handoff, update run-level context variables, or
+terminate the run by emitting a single-key marker object:
+
+| Marker key                  | Payload                                            | Effect                                        |
+|-----------------------------|----------------------------------------------------|-----------------------------------------------|
+| `__rswarm_agent_handoff`    | `"agent_name"` (must be registered on the `Swarm`) | Switches the active agent for the next turn  |
+| `__rswarm_context_update`   | object of `{ "key": "value", ... }`                | Merges into the run's `ContextVariables`     |
+| `__rswarm_termination`      | serialized `TerminationReason`                     | Ends the run with the given reason           |
+
+Anything else (string, number, object, array) is treated as a normal
+tool result and forwarded back to the model as a string.
+
+```rust
+use serde_json::json;
+// In a Tool::execute body:
+Ok(json!({ "__rswarm_agent_handoff": "specialist_agent" }))
+```
+
+### Notes
 
 - Parameter schemas must be JSON Schema objects with root `"type": "object"`.
 - Tool arguments are validated with `jsonschema`, not a hand-rolled subset.
-- `accepts_context_variables = true` passes validated arguments into the handler as `ContextVariables`.
 - `ToolCallExecution::Serial` threads context updates from one call into the next.
 - `ToolCallExecution::Parallel` executes calls independently and preserves per-tool success/failure reporting.
+- A `Tool` registered on the `Swarm` shadows any `AgentFunction` of the
+  same name on the agent, both at advertisement time and during dispatch.
 
-## Low-Level Tool API
+### Migrating from `AgentFunction`
 
-If you want a lower-level tool abstraction outside the `AgentFunction` flow, the crate also exposes:
+`AgentFunction::new(...)` and `Agent::with_functions(...)` are
+`#[deprecated]` since 0.1.9 and routed through the same dispatch path
+as the `Tool` trait, so existing code continues to work. To migrate
+without rewriting the closure body, wrap the `AgentFunction` with
+`ClosureTool::from_agent_function(...)`:
 
-- `Tool`
-- `ClosureTool`
-- `ToolRegistry`
-- `InvocationArgs`
-- `ToolSchema`
-- `ToolCallSpec`
+```rust
+# use rswarm::{ClosureTool, ToolRegistry};
+# fn build(my_agent_fn: rswarm::AgentFunction) {
+let mut registry = ToolRegistry::new();
+// The wrapped `AgentFunction`'s description is carried through by
+// default; call `.with_description(...)` to override or to supply one
+// when the source `AgentFunction` did not set one.
+registry.register(ClosureTool::from_agent_function(my_agent_fn));
+// ... swarm.builder().with_tool_registry(registry) ...
+# }
+```
 
-Use this layer when you want explicit tool registration/execution without relying on `AgentFunction`.
+`ClosureTool` emits the marker conventions for `ResultType::Agent`,
+`ResultType::ContextVariables`, and `ResultType::Termination`, so a
+migrated closure has the same observable behavior as before.
 
 ## Messages
 

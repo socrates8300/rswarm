@@ -1,4 +1,13 @@
 // src/main.rs
+//
+// This example still uses the closure-based `AgentFunction` registration
+// path, which is now `#[deprecated]` in favor of `Tool` + `ToolRegistry`
+// (see the README "Function Calling" section). The path continues to work
+// — the deprecation only flags it as not the recommended surface for new
+// code. To migrate, wrap the `AgentFunction` with
+// `ClosureTool::from_agent_function(...)` and register it on
+// `Swarm::builder().with_tool_registry(...)`.
+#![allow(deprecated)]
 
 mod browse_docs;
 

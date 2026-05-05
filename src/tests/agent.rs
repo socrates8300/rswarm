@@ -1,5 +1,9 @@
 #[cfg(test)]
 mod tests {
+    // Several tests in this module deliberately exercise the deprecated
+    // `AgentFunction` / `Agent::with_functions` migration path to keep
+    // coverage of the legacy dispatch surface during the transition.
+    #![allow(deprecated)]
     use crate::types::{
         AgentFunction, ContextVariables, FunctionCallPolicy, ResultType, ToolCallExecution,
     };

@@ -1,3 +1,8 @@
+// Some integration tests construct an `AgentFunction` to feed into the
+// `ClosureTool` migration helper, which is the documented bridge to the
+// new `Tool` trait — silence the deprecation warning module-wide.
+#![allow(deprecated)]
+
 use std::sync::{Arc, Mutex};
 
 use crate::core::Swarm;
@@ -65,6 +70,29 @@ mod tests {
         let args = InvocationArgs::from_value(json!({})).unwrap();
         let result = tool.execute(args).await.expect("execute failed");
         assert_eq!(result, json!("hello from closure"));
+    }
+
+    // 1b. ClosureTool::from_agent_function carries the source description
+    //     forward by default; the explicit setter overrides it.
+    #[tokio::test]
+    async fn test_closure_tool_inherits_description_from_agent_function() {
+        let fn_arc: Arc<AgentFunctionHandler> = Arc::new(|_ctx: ContextVariables| {
+            Box::pin(async move { Ok(ResultType::Value("ok".to_string())) })
+        });
+
+        let agent_fn = AgentFunction::new("greet", fn_arc.clone(), false)
+            .expect("valid agent function")
+            .with_description("greet the user");
+
+        let inherited = ClosureTool::from_agent_function(agent_fn);
+        assert_eq!(inherited.description(), "greet the user");
+
+        let agent_fn2 = AgentFunction::new("greet", fn_arc, false)
+            .expect("valid agent function")
+            .with_description("greet the user");
+        let overridden =
+            ClosureTool::from_agent_function(agent_fn2).with_description("explicit override");
+        assert_eq!(overridden.description(), "explicit override");
     }
 
     // 2. MaxIterationsError carries structured max/actual fields

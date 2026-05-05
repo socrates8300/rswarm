@@ -418,6 +418,10 @@ impl Agent {
         Ok(agent)
     }
 
+    #[deprecated(
+        since = "0.1.9",
+        note = "register tools on the Swarm via `SwarmBuilder::with_tool_registry(...)` using the `Tool` trait or `ClosureTool::from_agent_function`; agent-scoped `AgentFunction`s are routed through the same dispatch path but are no longer the recommended registration surface"
+    )]
     pub fn with_functions(mut self, functions: Vec<AgentFunction>) -> Self {
         self.functions = functions;
         self
@@ -679,6 +683,10 @@ pub struct AgentFunction {
 }
 
 impl AgentFunction {
+    #[deprecated(
+        since = "0.1.9",
+        note = "implement the `Tool` trait directly and register via `SwarmBuilder::with_tool_registry`; for closure-based migration, keep `AgentFunction` and wrap it with `ClosureTool::from_agent_function`"
+    )]
     pub fn new(
         name: impl Into<String>,
         function: Arc<AgentFunctionHandler>,
