@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use crate::core::Swarm;
 use crate::error::SwarmError;
 use crate::event::{AgentEvent, EventSubscriber};
+use crate::RunOptions;
 use crate::tool::{ClosureTool, InvocationArgs, Tool};
 use crate::types::{
     AgentFunction, AgentFunctionHandler, ContextVariables, Instructions, Message, ResultType,
@@ -121,11 +122,7 @@ mod tests {
             .run(
                 agent,
                 messages,
-                ContextVariables::new(),
-                None,
-                false,
-                false,
-                5,
+                RunOptions { max_turns: 5, ..RunOptions::default() },
             )
             .await
             .expect("run failed");

@@ -5,7 +5,7 @@ mod browse_docs;
 use crate::browse_docs::browse_rust_docs;
 use anyhow::{Context, Result};
 use dotenvy::dotenv;
-use rswarm::{Agent, AgentFunction, Instructions, Message, Swarm, ToolCallExecution};
+use rswarm::{Agent, AgentFunction, Instructions, Message, RunOptions, Swarm, ToolCallExecution};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -67,11 +67,10 @@ async fn main() -> Result<()> {
         .run(
             agents.get("Agent").expect("Agent not found").clone(),
             messages,
-            context_variables,
-            Some(model),
-            false, // Do not stream
-            false, // Debug mode off
-            max_turns,
+            RunOptions::new()
+                .with_context_variables(context_variables)
+                .with_model_override(Some(model))
+                .with_max_turns(max_turns),
         )
         .await
         .map_err(|e| anyhow::anyhow!("Swarm run failed: {}", e))?;

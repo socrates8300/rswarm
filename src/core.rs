@@ -83,12 +83,81 @@ impl Default for CircuitBreakerSettings {
     }
 }
 
-#[derive(Clone)]
-struct RunOptions {
-    model_override: Option<String>,
-    stream: bool,
-    debug: bool,
-    max_turns: usize,
+/// Configuration for a single [`Swarm::run`] execution.
+///
+/// Use `Default::default()` for sensible defaults, then override individual
+/// fields as needed. The struct is `#[non_exhaustive]` so new fields can be
+/// added in future minor releases without breaking callers.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use rswarm::RunOptions;
+///
+/// let options = RunOptions::new().with_max_turns(3);
+/// ```
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct RunOptions {
+    /// Context variables threaded through tool execution.
+    pub context_variables: ContextVariables,
+    /// Optional model override for this run. `None` uses the agent's default.
+    pub model_override: Option<String>,
+    /// Whether to stream the LLM response incrementally.
+    pub stream: bool,
+    /// Whether to print debug output during execution.
+    pub debug: bool,
+    /// Maximum number of conversation turns before the loop stops.
+    pub max_turns: usize,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            context_variables: ContextVariables::new(),
+            model_override: None,
+            stream: false,
+            debug: false,
+            max_turns: crate::constants::DEFAULT_MAX_LOOP_ITERATIONS as usize,
+        }
+    }
+}
+
+impl RunOptions {
+    /// Create a new `RunOptions` with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the context variables for this run.
+    pub fn with_context_variables(mut self, ctx: ContextVariables) -> Self {
+        self.context_variables = ctx;
+        self
+    }
+
+    /// Set the model override for this run.
+    pub fn with_model_override(mut self, model: Option<String>) -> Self {
+        self.model_override = model;
+        self
+    }
+
+    /// Set whether to stream the LLM response.
+    pub fn with_stream(mut self, stream: bool) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    /// Set whether to enable debug output.
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
+    }
+
+    /// Set the maximum number of conversation turns.
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = max_turns;
+        self
+    }
 }
 
 struct RunState {
@@ -2460,34 +2529,25 @@ impl Swarm {
     }
 
     /// Executes a multi-turn conversation with the AI agent.
-    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
-        mut agent: Agent,
+        agent: Agent,
         messages: Vec<Message>,
-        context_variables: ContextVariables,
-        model_override: Option<String>,
-        stream: bool,
-        debug: bool,
-        max_turns: usize,
+        mut options: RunOptions,
     ) -> SwarmResult<Response> {
-        validate_api_request(&agent, &messages, &model_override, max_turns)?;
+        let mut agent = agent;
 
-        if max_turns > self.config.max_loop_iterations() as usize {
+        validate_api_request(&agent, &messages, &options.model_override, options.max_turns)?;
+
+        if options.max_turns > self.config.max_loop_iterations() as usize {
             return Err(SwarmError::ValidationError(format!(
                 "max_turns ({}) exceeds configured max_loop_iterations ({})",
-                max_turns,
+                options.max_turns,
                 self.config.max_loop_iterations()
             )));
         }
 
         let trace_id = TraceId::from(uuid::Uuid::new_v4().to_string());
-        let options = RunOptions {
-            model_override,
-            stream,
-            debug,
-            max_turns,
-        };
 
         self.create_session_if_configured(&trace_id, agent.name())
             .await;
@@ -2500,7 +2560,7 @@ impl Swarm {
 
         let instructions = match &agent.instructions {
             Instructions::Text(text) => text.clone(),
-            Instructions::Function(func) => func(context_variables.clone()),
+            Instructions::Function(func) => func(options.context_variables.clone()),
         };
         let (instructions_without_xml, xml_steps) = extract_xml_steps(&instructions)?;
         let steps = if let Some(xml_content) = xml_steps {
@@ -2518,6 +2578,7 @@ impl Swarm {
                 instructions_without_xml
             };
         agent.instructions = Instructions::Text(effective_instructions);
+        let context_variables = std::mem::take(&mut options.context_variables);
         let mut state = RunState {
             agent,
             history: messages,
@@ -2619,6 +2680,34 @@ impl Swarm {
         }
     }
 
+    /// Legacy entry point with positional parameters.
+    ///
+    /// Prefer [`run`](Self::run) with [`RunOptions`] instead.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `run` with `RunOptions` instead"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_legacy(
+        &self,
+        agent: Agent,
+        messages: Vec<Message>,
+        context_variables: ContextVariables,
+        model_override: Option<String>,
+        stream: bool,
+        debug: bool,
+        max_turns: usize,
+    ) -> SwarmResult<Response> {
+        let options = RunOptions {
+            context_variables,
+            model_override,
+            stream,
+            debug,
+            max_turns,
+        };
+        self.run(agent, messages, options).await
+    }
+
     /// Saves a checkpoint if a `CheckpointStore` is configured.
     ///
     /// Failures are non-fatal — they are traced at WARN level but do not abort
@@ -2711,16 +2800,14 @@ impl Swarm {
             });
         }
 
-        self.run(
-            agent,
-            envelope.payload.messages,
-            envelope.payload.context_variables,
+        let options = RunOptions {
+            context_variables: envelope.payload.context_variables,
             model_override,
             stream,
             debug,
-            remaining,
-        )
-        .await
+            max_turns: remaining,
+        };
+        self.run(agent, envelope.payload.messages, options).await
     }
 
     pub fn get_agent_by_name(&self, name: &str) -> SwarmResult<Agent> {
