@@ -15,7 +15,7 @@ use crate::util::{debug_print, function_to_json};
 ///
 /// **Deprecated:** Use [`Swarm::run`] with `stream: true` in [`RunOptions`](crate::RunOptions) instead.
 #[deprecated(
-    since = "0.2.0",
+    since = "0.1.9",
     note = "use `Swarm::run` with `stream: true` in `RunOptions` instead"
 )]
 pub struct Streamer {

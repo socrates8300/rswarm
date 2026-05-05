@@ -2844,7 +2844,7 @@ impl Swarm {
     /// Legacy entry point with positional parameters.
     ///
     /// Prefer [`run`](Self::run) with [`RunOptions`] instead.
-    #[deprecated(since = "0.2.0", note = "use `run` with `RunOptions` instead")]
+    #[deprecated(since = "0.1.9", note = "use `run` with `RunOptions` instead")]
     #[allow(clippy::too_many_arguments)]
     pub async fn run_legacy(
         &self,
