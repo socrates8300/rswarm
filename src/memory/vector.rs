@@ -6,8 +6,9 @@
 //! search with cosine similarity. It is suitable for development and for
 //! small-scale production use where a full vector database is not needed.
 //!
-//! Production deployments can swap in the `sqlite-vec` or Qdrant adapters
-//! (behind feature flags) without changing any call sites.
+//! Persistent backends (e.g. Qdrant, sqlite-vec) are planned but not yet
+//! implemented; downstream users can implement [`VectorMemory`] for any
+//! backend without changing call sites.
 
 use crate::error::{SwarmError, SwarmResult};
 use async_trait::async_trait;
@@ -92,9 +93,9 @@ pub struct MemoryEntry {
 
 /// An embedding-backed semantic memory store.
 ///
-/// Implementations may be local (in-process) or remote (Qdrant, etc.)
-/// without changing caller code. All methods take `&self` so the store can
-/// be shared via `Arc<dyn VectorMemory>`.
+/// Implementations may be local (in-process) or backed by an external
+/// vector database. All methods take `&self` so the store can be shared
+/// via `Arc<dyn VectorMemory>`.
 #[async_trait]
 pub trait VectorMemory: Send + Sync {
     /// Insert or replace an entry. If an entry with `id` already exists it
