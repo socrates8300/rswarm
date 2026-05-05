@@ -3319,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "rswarm"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "actix-web",
  "anyhow",
