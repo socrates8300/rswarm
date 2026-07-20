@@ -2,7 +2,7 @@
 
 **Scope:** Dependency security audit + Dependabot enablement + code review.
 **Branch:** `chore/security-and-review`
-**Outcome:** 10 vulnerabilities resolved (0 remaining); 0 regressions; findings below.
+**Outcome:** 10 `cargo audit` vulnerabilities + 1 additional GitHub Dependabot alert resolved; `openssl`/`native-tls` eliminated from the dependency tree entirely; 0 regressions.
 
 ---
 
@@ -55,12 +55,14 @@ Resolved in the lockfile:
 ### Verification
 
 ```
-cargo update                 # lockfile refreshed
-cargo build --all-targets    # exit 0, 0 warnings
-cargo test --workspace --all-features  # 169 passed, 0 failed
+cargo update                                   # lockfile refreshed
+cargo build --all-targets --all-features       # exit 0, 0 warnings
+cargo test --workspace --all-features          # 169 passed, 0 failed
 cargo clippy --workspace --all-targets --all-features -- -D warnings  # exit 0
-cargo fmt --all --check      # exit 0
-cargo audit                  # 0 vulnerabilities, 0 warnings
+cargo fmt --all --check                        # exit 0
+cargo audit                                    # 0 vulnerabilities, 0 warnings
+cargo tree -i openssl --all-features           # "did not match any packages"
+cargo tree -i native-tls --all-features        # "did not match any packages"
 ```
 
 ### Notes on the `quick-xml` 0.36 → 0.41 jump
@@ -69,7 +71,30 @@ This was the only bump spanning a major-API boundary. Verified safe because rswa
 
 ### Remaining advisories
 
-**None.** All 10 vulnerabilities and all 5 unsound/yanked warnings cleared. The three `rand` RUSTSEC-2026-0097 entries (one per resolved version) were all transitively pulled by now-updated parents (`quinn-proto`, `tokio-postgres`, `headless_chrome`).
+**None.** All 10 `cargo audit` vulnerabilities and all 5 unsound/yanked warnings cleared. The three `rand` RUSTSEC-2026-0097 entries (one per resolved version) were all transitively pulled by now-updated parents (`quinn-proto`, `tokio-postgres`, `headless_chrome`).
+
+### Reconciliation with GitHub Dependabot alerts (17 on `main`)
+
+GitHub's Dependabot reported **17 alerts on `main`** — a broader set than `cargo audit`'s 10 because GitHub scans the default branch continuously and includes alerts fixed by transitive updates it hadn't yet rescanned. Cross-referencing each of the 17 alerts against this branch's resolved versions:
+
+| Status | Count | Packages |
+|---|---|---|
+| Already fixed on this branch (stale alerts — auto-close on merge) | 16 | `rand` (×3), `rustls-webpki` (×3), `actix-http`, `openssl` (×7), `cmov` |
+| Genuinely still vulnerable — **fixed in this PR** | 1 | `opentelemetry_sdk` 0.31.0 → 0.32.1 (GHSA-w9wp-h8wv-79jx / CVE-2026-48504) |
+
+### `opentelemetry_sdk` 0.31 → 0.32 (the 1 remaining real alert)
+
+Bumped the full otel stack together (`opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp` 0.31 → 0.32; `tracing-opentelemetry` 0.32 → 0.33, which tracks the otel API version). Despite 0.32 carrying breaking changes for some consumers, rswarm's entire otel footprint is one function — `init_tracer` in `src/observability.rs` (~50 lines, behind the `otel` feature flag, no tests) — and its API surface (`SdkTracerProvider::builder()`, `Resource::builder()`, `SpanExporter::builder().with_tonic()`, `with_batch_exporter`) is stable across the bump. **Zero source changes required.**
+
+### `openssl` eliminated from the dependency tree (architectural fix)
+
+7 of the 17 GitHub alerts were against `openssl`, which was in the tree as dead weight: rswarm requests `rustls-tls` but never set `default-features = false` on its `reqwest` dependency, so Cargo's feature unification also pulled the *default* `default-tls` → `native-tls` → `openssl` stack. The codebase never touches openssl. Additionally, `mcp_rs` (a dev-dependency with **zero references** anywhere in `src/`, tests, or examples — an orphan from commit `60df4cb`) was the sole remaining puller of `native-tls` via its own `reqwest` + `reqwest-eventsource` deps.
+
+Fixes applied:
+- `Cargo.toml` / `rswarm_examples/Cargo.toml`: `reqwest default-features = false` (keeps `json`/`stream`/`rustls-tls`; drops `default-tls`, `charset`, `http2`, `system-proxy`, none of which the codebase uses).
+- `Cargo.toml`: removed the `mcp_rs` dev-dependency. `actix-web` dev-dep retained (actively used by `src/tests/swarm_run.rs` mock servers).
+
+Result: `cargo tree -i openssl` and `cargo tree -i native-tls` both return *"did not match any packages"*. The lockfile shrank by ~800 lines. The 7 openssl advisories can no longer recur in any future version.
 
 ---
 
@@ -80,13 +105,7 @@ This was the only bump spanning a major-API boundary. Verified safe because rswa
 
 ### Manual follow-up (repo owner)
 
-The GitHub Dependabot **alerts API** returns 403 with the current `gh` token (`claudewalden0`, scopes: `repo` only). To enable alert visibility from the CLI:
-
-```
-gh auth refresh -h github.com -s security_events
-```
-
-This is not required for Dependabot PRs to work (those need only the repo setting enabled at https://github.com/socrates8300/rswarm/settings/security_analysis), but it lets `gh api .../dependabot/alerts` succeed.
+After merging this PR, GitHub will rescan `main` and the 16 stale Dependabot alerts will auto-close. To monitor alerts via the CLI going forward, the `gh` token can be broadened with `gh auth refresh -h github.com -s security_events` (the `repo` scope alone is sometimes sufficient for reads, as observed during this audit).
 
 ---
 
