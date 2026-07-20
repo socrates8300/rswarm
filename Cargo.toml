@@ -49,7 +49,7 @@ futures = "0.3.31"
 futures-util = "0.3.31"
 quick-xml = { version = "0.41", features = ["serde", "serialize"] }
 regex = "1.11.0"
-reqwest = { version = "0.12.9", features = [
+reqwest = { version = "0.12.9", default-features = false, features = [
     "json",
     "stream",
     "rustls-tls",
@@ -65,6 +65,5 @@ jsonschema = { version = "0.45", default-features = false }
 
 [dev-dependencies]
 actix-web = "4.9.0"
-mcp_rs = "0.1.0"
 tokio = { version = "1.40.0", features = ["full", "test-util", "rt", "macros"] }
 wiremock = "0.6"
