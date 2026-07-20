@@ -39,3 +39,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features --no-fail-fast
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    # Fail the CI run when a published RustSec advisory affects our dependency graph.
+    # Keeps `cargo audit` parity with Dependabot security alerts so vulnerabilities
+    # surface at PR time rather than after a release.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,38 @@
+# Dependabot configuration for rswarm
+# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+version: 2
+
+updates:
+  # Root workspace crate (Cargo.lock at repo root covers both `rswarm` and `rswarm_examples`).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    # Group patch and minor bumps together to keep PR noise low; leave majors separate
+    # so they get individual review for breaking changes.
+    groups:
+      patch-and-minor:
+        update-types:
+          - patch
+          - minor
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+
+  # Keep GitHub Actions versions current (CI workflow, third-party actions).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: chore(deps)
+      include: scope
