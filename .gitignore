@@ -3,6 +3,7 @@ target
 output.txt
 .claude/settings.local.json
 .claude/*.lock
+.zcode/
 POSTGRES_ANALYSIS.md
 cargo
 cargo_err_output
