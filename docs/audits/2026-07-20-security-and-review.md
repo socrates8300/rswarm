@@ -91,7 +91,7 @@ Bumped the full otel stack together (`opentelemetry`, `opentelemetry_sdk`, `open
 7 of the 17 GitHub alerts were against `openssl`, which was in the tree as dead weight: rswarm requests `rustls-tls` but never set `default-features = false` on its `reqwest` dependency, so Cargo's feature unification also pulled the *default* `default-tls` → `native-tls` → `openssl` stack. The codebase never touches openssl. Additionally, `mcp_rs` (a dev-dependency with **zero references** anywhere in `src/`, tests, or examples — an orphan from commit `60df4cb`) was the sole remaining puller of `native-tls` via its own `reqwest` + `reqwest-eventsource` deps.
 
 Fixes applied:
-- `Cargo.toml` / `rswarm_examples/Cargo.toml`: `reqwest default-features = false` (keeps `json`/`stream`/`rustls-tls`; drops `default-tls`, `charset`, `http2`, `system-proxy`, none of which the codebase uses).
+- `Cargo.toml` / `rswarm_examples/Cargo.toml`: `reqwest default-features = false` to drop `default-tls` (the openssl pull). Re-enabled `json`/`stream`/`rustls-tls`/`http2`/`system-proxy` so OpenAI traffic still speaks HTTP/2 and `HTTP_PROXY`/`HTTPS_PROXY` still work. `charset` stays off — JSON APIs are UTF-8.
 - `Cargo.toml`: removed the `mcp_rs` dev-dependency. `actix-web` dev-dep retained (actively used by `src/tests/swarm_run.rs` mock servers).
 
 Result: `cargo tree -i openssl` and `cargo tree -i native-tls` both return *"did not match any packages"*. The lockfile shrank by ~800 lines. The 7 openssl advisories can no longer recur in any future version.
@@ -100,8 +100,8 @@ Result: `cargo tree -i openssl` and `cargo tree -i native-tls` both return *"did
 
 ## 2. Dependabot & CI
 
-- **Added `.github/dependabot.yml`** — weekly cadence (Monday), `cargo` ecosystem at repo root (covers both workspace members), patch+minor updates grouped into a single PR, majors kept separate for individual review. Also tracks `github-actions` ecosystem.
-- **Added `cargo audit` job** to `.github/workflows/ci.yml` via `rustsec/audit-check@v2.0.0`. Future advisories will now fail CI at PR time — closing the gap that left these 10 vulnerabilities undetected for months.
+- **Added `.github/dependabot.yml`** — weekly cadence (Monday), `cargo` and `github-actions` at repo root, `open-pull-requests-limit: 5`, existing `dependencies` label only. Patch/minor are not bundled into one megapr so a bad bump stays attributable.
+- **Added `cargo audit` job** to `.github/workflows/ci.yml` via `rustsec/audit-check@v2.0.0`, with `checks: write` and a Monday schedule so advisories against an unchanged lockfile still fail CI.
 
 ### Manual follow-up (repo owner)
 
@@ -111,7 +111,7 @@ After merging this PR, GitHub will rescan `main` and the 16 stale Dependabot ale
 
 ## 3. Code review findings
 
-**Summary: no safe inline fixes were required.** `cargo clippy -D warnings` passed clean and no warnings were introduced by the version bumps. The findings below are architectural observations for future work, **not actioned in this PR**.
+**Summary:** version bumps introduced no new clippy warnings. One pre-existing `clippy::useless_borrows_in_formatting` hit in `src/tests/stream.rs` (now failing on rustc 1.97 / CI `@stable`) was fixed so the documented clippy gate is actually green. The findings below are architectural observations for future work.
 
 ### 3.1 Panic-surface audit — *healthy, no action needed*
 

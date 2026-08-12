@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Re-audit main when no PR is open. Advisories against a frozen lockfile
+    # would otherwise sit until the next dependency bump.
+    - cron: "17 8 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,6 +16,7 @@ env:
 jobs:
   fmt:
     name: cargo fmt --check
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +27,7 @@ jobs:
 
   clippy:
     name: cargo clippy
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +39,7 @@ jobs:
 
   test:
     name: cargo test
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,9 +50,13 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
     # Fail the CI run when a published RustSec advisory affects our dependency graph.
     # Keeps `cargo audit` parity with Dependabot security alerts so vulnerabilities
-    # surface at PR time rather than after a release.
+    # surface at PR time rather than after a release. The weekly schedule covers
+    # advisories published against an unchanged lockfile.
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2.0.0

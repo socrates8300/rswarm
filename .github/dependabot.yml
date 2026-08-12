@@ -10,16 +10,8 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
-    # Group patch and minor bumps together to keep PR noise low; leave majors separate
-    # so they get individual review for breaking changes.
-    groups:
-      patch-and-minor:
-        update-types:
-          - patch
-          - minor
     labels:
       - dependencies
-      - rust
     commit-message:
       prefix: chore(deps)
       include: scope
@@ -32,7 +24,6 @@ updates:
       day: monday
     labels:
       - dependencies
-      - ci
     commit-message:
       prefix: chore(deps)
       include: scope
