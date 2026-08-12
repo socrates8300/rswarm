@@ -28,18 +28,18 @@ otel = [
 ]
 
 [dependencies]
-anyhow = "1.0.89"
+anyhow = "1.0.103"
 rusqlite = { version = "0.31", features = ["bundled"] }
 metrics = "0.23"
 metrics-exporter-prometheus = { version = "0.15", optional = true }
-tokio-postgres = { version = "0.7.13", optional = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
+tokio-postgres = { version = "0.7.18", optional = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
 tokio-postgres-rustls = { version = "0.12", optional = true }
 rustls = { version = "0.23", optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
-opentelemetry = { version = "0.31", optional = true }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["trace", "grpc-tonic", "tls-roots"], optional = true }
-tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.32", optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.32", features = ["trace", "grpc-tonic", "tls-roots"], optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
 tracing-subscriber = { version = "0.3.20", features = ["registry"], optional = true }
 async-stream = "0.3.6"
 async-trait = "0.1.83"
@@ -47,12 +47,14 @@ chrono = { version = "0.4.38", features = ["serde"] }
 dotenvy = "0.15"
 futures = "0.3.31"
 futures-util = "0.3.31"
-quick-xml = { version = "0.36.2", features = ["serde", "serialize"] }
+quick-xml = { version = "0.41", features = ["serde", "serialize"] }
 regex = "1.11.0"
-reqwest = { version = "0.12.9", features = [
+reqwest = { version = "0.12.9", default-features = false, features = [
     "json",
     "stream",
     "rustls-tls",
+    "http2",
+    "system-proxy",
 ] }
 serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"
@@ -65,6 +67,5 @@ jsonschema = { version = "0.45", default-features = false }
 
 [dev-dependencies]
 actix-web = "4.9.0"
-mcp_rs = "0.1.0"
 tokio = { version = "1.40.0", features = ["full", "test-util", "rt", "macros"] }
 wiremock = "0.6"

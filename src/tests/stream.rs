@@ -43,7 +43,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let api_url = format!("{}/completions", &mock_server.uri());
+        let api_url = format!("{}/completions", mock_server.uri());
 
         // Create an HTTP client.
         let client = Client::builder()
