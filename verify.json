@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "gate": "cargo fmt --all --check && cargo clippy --workspace --all-targets --all-features -- -D warnings",
+  "verify": "export RUSTFLAGS='-D warnings' && cargo fmt --all --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --all-features --no-fail-fast"
+}
