@@ -36,7 +36,7 @@ tokio-postgres = { version = "0.7.18", optional = true, features = ["with-chrono
 tokio-postgres-rustls = { version = "0.12", optional = true }
 rustls = { version = "0.23", optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.33", optional = true }
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.32", features = ["trace", "grpc-tonic", "tls-roots"], optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
